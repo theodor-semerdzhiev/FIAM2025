@@ -67,6 +67,7 @@ if __name__ == "__main__":
     pred_out = pd.DataFrame()
 
     # estimation with expanding window
+    # CARTER: We should completely rehaul all of this while loop with our own models, preferrably not all in this script ;)
     while (starting + pd.DateOffset(years=11 + counter)) <= pd.to_datetime(
         "20260101", format="%Y%m%d"
     ):
