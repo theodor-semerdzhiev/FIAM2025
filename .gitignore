@@ -1,3 +1,5 @@
 ret_sample.csv
 *.csv
 \data
+\structured_json_outputs
+*.json
