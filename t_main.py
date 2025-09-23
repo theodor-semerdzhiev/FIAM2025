@@ -94,6 +94,47 @@ class FeatureConfig:
     path_window: int = 6      # months (rolling over each id)
 
 
+def add_meta_features_v2(df, date_col, id_col, regime_col=None):
+    df = df.sort_values([id_col, date_col]).copy()
+
+    # Factor momentum
+    for col in ["qmj", "o_score"]:
+        df[f"{col}_chg6m"] = df.groupby(id_col)[col].diff(6)
+
+    # Factor volatility (rolling instability)
+    for col in ["qmj", "ivol_capm_21d"]:
+        df[f"{col}_vol6m"] = df.groupby(id_col)[col].rolling(6, min_periods=3).std().reset_index(level=0, drop=True)
+
+    # Peer-relative quality
+    df["gp_at_rel"] = df["gp_at"] - df.groupby([date_col, "excntry"])["gp_at"].transform("median")
+
+    # Value × Quality interaction
+    df["val_qual_combo"] = df["be_me"] * df["qmj_prof"]
+
+    # Drawdown on 12m return
+    roll_max = df.groupby(id_col)["ret_12_1"].rolling(12, min_periods=3).max().reset_index(level=0, drop=True)
+    df["dd_12m"] = df["ret_12_1"] - roll_max
+
+    # Persistence: share of last 12 months with positive returns
+    df["mom_persistence"] = df.groupby(id_col)["ret_1_0"].rolling(12, min_periods=6).apply(lambda s: (s > 0).mean(), raw=True).reset_index(level=0, drop=True)
+
+    # Signal breadth (multi-factor agreement)
+    bullish_flags = [
+        df["ret_12_1"] > 0,
+        df["qmj"] > 0,
+        df["be_me"] > 0,
+        df["mispricing_perf"] > 0
+    ]
+    df["signal_breadth"] = np.sum(bullish_flags, axis=0)
+
+    # Optional: factor × regime interaction
+    if regime_col and regime_col in df.columns:
+        df["qmj_regime_int"] = df["qmj"] * df[regime_col]
+
+    return df
+
+
+
 def add_price_path_features(df: pd.DataFrame, id_col: str, date_col: str, ret_col: str, path_window: int) -> pd.DataFrame:
     """
     Vectorized rolling path descriptors per security. Avoids groupby.apply,
@@ -285,27 +326,27 @@ if __name__ == "__main__":
     if missing_factors:
         raise KeyError(f"Missing factor(s) in data: {missing_factors[:10]}{' …' if len(missing_factors)>10 else ''}")
 
-    ## --- monthly rank-scaling to [-1,1] ---
-    # print(f"[{ts()}] Grouping cross-sections by '{date_col}' and rank-scaling to [-1,1] per month")
-    # monthly = data0.groupby(date_col, sort=True)
-    # chunks = []
-    # for m_i, (date_val, monthly_raw) in enumerate(monthly, start=1):
-    #     group = monthly_raw.copy()
-    #     zeroed_vars_this_month = 0
-    #     for var in stock_vars:
-    #         med = group[var].median(skipna=True)
-    #         group[var] = group[var].fillna(med)
-    #         group[var] = group[var].rank(method="dense") - 1
-    #         gmax = group[var].max()
-    #         if pd.isna(gmax) or gmax <= 0:
-    #             group[var] = 0
-    #             zeroed_vars_this_month += 1
-    #         else:
-    #             group[var] = (group[var] / gmax) * 2 - 1
-    #     chunks.append(group)
-    #     if m_i <= 3 or m_i % 12 == 0:
-    #         print(f"[{ts()}] {date_val.date()} | zeroed vars={zeroed_vars_this_month}")
-    # data = pd.concat(chunks, ignore_index=True)
+    # --- monthly rank-scaling to [-1,1] ---
+    print(f"[{ts()}] Grouping cross-sections by '{date_col}' and rank-scaling to [-1,1] per month")
+    monthly = data0.groupby(date_col, sort=True)
+    chunks = []
+    for m_i, (date_val, monthly_raw) in enumerate(monthly, start=1):
+        group = monthly_raw.copy()
+        zeroed_vars_this_month = 0
+        for var in stock_vars:
+            med = group[var].median(skipna=True)
+            group[var] = group[var].fillna(med)
+            group[var] = group[var].rank(method="dense") - 1
+            gmax = group[var].max()
+            if pd.isna(gmax) or gmax <= 0:
+                group[var] = 0
+                zeroed_vars_this_month += 1
+            else:
+                group[var] = (group[var] / gmax) * 2 - 1
+        chunks.append(group)
+        if m_i <= 3 or m_i % 12 == 0:
+            print(f"[{ts()}] {date_val.date()} | zeroed vars={zeroed_vars_this_month}")
+    data = pd.concat(chunks, ignore_index=True)
 
 
     # --- leak-safe rolling features computed once (do *not* use future info) ---
@@ -318,22 +359,23 @@ if __name__ == "__main__":
         path_window=6,
     )
 
-    # print(hrule("-"))
-    # print(f"[{ts()}] Computing leak-safe rolling PRICE PATH features (window={cfg.path_window})…")
-    # data = add_price_path_features(data, id_col=id_col, date_col=date_col, ret_col=ret_var, path_window=cfg.path_window)
+    print(hrule("-"))
+    print(f"[{ts()}] Computing leak-safe rolling PRICE PATH features (window={cfg.path_window})…")
+    data = add_price_path_features(data, id_col=id_col, date_col=date_col, ret_col=ret_var, path_window=cfg.path_window)
 
-    # print(f"[{ts()}] Computing FACTOR MOMENTUM features (vars={len(cfg.momentum_vars)}, window={cfg.momentum_window})…")
-    # data = add_factor_momentum(data, date_col=date_col, ret_col=ret_var, vars_=cfg.momentum_vars, window=cfg.momentum_window)
+    print(f"[{ts()}] Computing FACTOR MOMENTUM features (vars={len(cfg.momentum_vars)}, window={cfg.momentum_window})…")
+    data = add_factor_momentum(data, date_col=date_col, ret_col=ret_var, vars_=cfg.momentum_vars, window=cfg.momentum_window)
 
-
+    print(f"[{ts()}] Computing META features (v2 transforms)…")
+    data = add_meta_features_v2(data, date_col=date_col, id_col=id_col)
 
     ####Comment this section to run without the saved file ###############
     rankscaled_path = os.path.join(work_dir, "data/rank_scaled.parquet")
-    # print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
-    # data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
+    print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
+    data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
 
-    data = pd.read_parquet(rankscaled_path, engine="pyarrow")
-    print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
+    # data = pd.read_parquet(rankscaled_path, engine="pyarrow")
+    # print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
     ####End of comment section to run without the saved file ###############
 
 
@@ -359,8 +401,30 @@ if __name__ == "__main__":
     # master list of base vars + engineered features (regime dummies will be added per-iter)
     base_features = stock_vars + engineered_cols_static
 
+
+    out_path = os.path.join(work_dir, "output.csv")
+
+    def _append_preds(df: pd.DataFrame, path: str):
+        """Append predictions to CSV with header only if file is new/empty."""
+        # Ensure consistent column order across iterations
+        desired = ["year","month","ret_eom", id_col, ret_var, date_col, "ridge","xgb","cat","blend",
+                "iter","train_start","train_end","val_end","test_end"]
+        for c in desired:
+            if c not in df.columns:
+                df[c] = np.nan
+        df = df[desired]
+
+        write_header = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+        df.to_csv(path, mode="a", header=write_header, index=False)
+
     while (starting + pd.DateOffset(years=11 + counter)) <= pd.to_datetime("2026-01-01"):
+
         loop_iter += 1
+        # ✅ Skip until the 7th iteration OR after a certain year
+        if loop_iter < 8:
+            counter += 1
+            continue
+
         c0 = starting
         c1 = starting + pd.DateOffset(years=8 + counter)   # training upper bound
         c2 = starting + pd.DateOffset(years=10 + counter)  # validation upper bound
@@ -395,13 +459,21 @@ if __name__ == "__main__":
         feat_cols = base_features + regime_dummy_cols
 
         # Some engineered features may be NA early in the sample; fill with cross-sectional median per date
+        # replace this inside the loop over df_part:
+        # df_part[col] = df_part[col].fillna(df_part.groupby(date_col)[col].transform(lambda s: s.fillna(s.median())))
+
         for df_part in (train_df_reg, validate_df_reg, test_df_reg):
             for col in engineered_cols_static:
                 if col not in df_part.columns:
                     continue
-                df_part[col] = df_part[col].fillna(df_part.groupby(date_col)[col].transform(lambda s: s.fillna(s.median())))
+                df_part[col] = df_part[col].fillna(
+                    df_part.groupby(date_col)[col].transform(
+                        lambda s: s.fillna(s.median(skipna=True)) if s.notna().any() else s.fillna(0.0)
+                    )
+                )
             # any remaining NAs → 0 as last resort
             df_part[engineered_cols_static] = df_part[engineered_cols_static].fillna(0.0)
+
 
         # --- Standardize base numeric features on training only for linear model ---
         print(f"[{ts()}] Fitting StandardScaler on training features…")
@@ -539,6 +611,21 @@ if __name__ == "__main__":
         reg_pred["blend"] = blend_test
         blend_mse_test = mean_squared_error(Y_test, blend_test)
         print(f"[{ts()}] BLEND: Test MSE={blend_mse_test:.8f}")
+
+
+        reg_pred["iter"] = loop_iter
+        reg_pred["train_start"] = c0.date()
+        reg_pred["train_end"]   = (c1 - pd.Timedelta(days=1)).date()
+        reg_pred["val_end"]     = (c2 - pd.Timedelta(days=1)).date()
+        reg_pred["test_end"]    = (c3 - pd.Timedelta(days=1)).date()
+
+        # ---- NEW: write this iteration's predictions immediately ----
+        try:
+            _append_preds(reg_pred, out_path)
+            print(f"[{ts()}] Appended {len(reg_pred):,} rows to {out_path}")
+        except Exception as e:
+            print(f"[{ts()}] ERROR appending iteration {loop_iter} to {out_path}: {e}")
+        # -------------------------------------------------------------
 
         pred_frames.append(reg_pred)
         counter += 1
