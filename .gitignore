@@ -4,3 +4,9 @@ ret_sample.csv
 \embedding_batches
 *.json
 data_exploration.ipynb
+\.venv
+\.conda
+\catboost_info
+McGill-FIAM Asset Management Hackathon First Challenge 2025.pdf
+output.csv
+prompt.txt
