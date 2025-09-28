@@ -109,6 +109,9 @@ if __name__ == "__main__":
         counter += 1
 
     print("\n--- Training complete. Saving generated risk scores. ---")
+    pred_out.rename(columns={'date_dt': 'date'}, inplace=True)
+    pred_out['date'] = pred_out['date'].dt.strftime('%Y%m%d').astype(int)
+    
     pred_out.to_csv("text_based_risk_scores.csv", index=False)
     print("Risk scores saved to 'text_based_risk_scores.csv'")
 
