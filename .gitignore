@@ -1,3 +1,6 @@
 ret_sample.csv
 *.csv
 \data
+\embedding_batches
+*.json
+data_exploration.ipynb
