@@ -105,5 +105,4 @@ if __name__ == "__main__":
 
     print("\n--- All batches processed successfully! ---")
     print(f"The output is a folder named '{BATCH_DIR}' containing all the processed embedding files.")
-    print("You can now run the 'main_modeling_pipeline.py' script.")
 
