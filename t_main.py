@@ -322,6 +322,33 @@ if __name__ == "__main__":
         raise RuntimeError("Dataset is empty after dropping missing targets.")
     print(f"[{ts()}] Date coverage: {data0[date_col].min().date()} → {data0[date_col].max().date()}")
 
+
+    # === Merge per-id, per-date risk_score only ===
+    aux_path = os.path.join(work_dir, "data/text_based_risk_scores.csv")  # adjust to your file name
+
+    print(f"[{ts()}] Reading risk_score file: {aux_path}")
+    aux = pd.read_csv(aux_path, usecols=["id", "date_dt", "risk_score"])
+
+    # Normalize date
+    aux["date_dt"] = parse_date_col(aux["date_dt"])
+    aux = aux.rename(columns={"date_dt": "date"})
+    aux["id"] = aux["id"].astype(str)
+    data0["id"] = data0["id"].astype(str)
+
+    # Deduplicate if necessary
+    aux = aux.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
+
+    # Merge risk_score into main data
+    pre_rows = len(data0)
+    data0 = data0.merge(aux, on=["id", "date"], how="left", validate="m:1")
+    post_rows = len(data0)
+    assert pre_rows == post_rows, "Row count changed unexpectedly after merge."
+
+    # Diagnostics
+    matched = data0["risk_score"].notna().sum()
+    print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
+
+
     missing_factors = [v for v in stock_vars if v not in data0.columns]
     if missing_factors:
         raise KeyError(f"Missing factor(s) in data: {missing_factors[:10]}{' …' if len(missing_factors)>10 else ''}")
