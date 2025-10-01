@@ -348,6 +348,44 @@ if __name__ == "__main__":
     matched = data0["risk_score"].notna().sum()
     print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
 
+    # === NEW: Merge per-id, per-date SIMILARITY features ===
+    sim_path = os.path.join(work_dir, "data/similarity_scores.csv")
+    print(f"[{ts()}] Reading similarity features: {sim_path}")
+
+    sim_usecols = [
+        "id","date",
+        "similarity_score","similarity_confidence","similarity_matches",
+        "similarity_volatility","similarity_strength","similarity_rank_pct",
+        "similarity_vs_median","high_confidence_similarity"
+    ]
+    sim = pd.read_csv(sim_path, usecols=sim_usecols)
+
+    # Normalize types
+    sim["date"] = parse_date_col(sim["date"])
+    sim["id"] = sim["id"].astype(str)
+
+    # (Optional but robust) coerce numerics
+    for c in sim.columns:
+        if c not in ("id","date"):
+            sim[c] = pd.to_numeric(sim[c], errors="coerce")
+
+    # Deduplicate (last wins)
+    sim = sim.sort_values(["id","date"]).drop_duplicates(["id","date"], keep="last")
+
+    # Merge
+    pre_rows = len(data0)
+    data0 = data0.merge(sim, on=["id","date"], how="left", validate="m:1")
+    post_rows = len(data0)
+    assert pre_rows == post_rows, "Row count changed unexpectedly after similarity merge."
+
+    # Diagnostics
+    sim_cols = [c for c in sim_usecols if c not in ("id","date")]
+    sim_match_any = data0[sim_cols].notna().any(axis=1).sum()
+    sim_match_main = data0["similarity_score"].notna().sum()
+    print(f"[{ts()}] similarity_* merged: any-feature matched {sim_match_any:,} rows; "
+        f"similarity_score matched {sim_match_main:,} rows.")
+
+
 
     missing_factors = [v for v in stock_vars if v not in data0.columns]
     if missing_factors:
@@ -408,11 +446,19 @@ if __name__ == "__main__":
 
 
 
-
     # Collect engineered columns here; regime added inside the loop because it must be fit on train only
     engineered_cols_static = [
         "price_path", "pp_cumret_w", "pp_vol_w", "pp_downside_w", "pp_signchg_w", "factor_momentum"
     ]
+
+    # NEW: declare extra (non-ranked) external features that should feed the models
+    external_extra_features = [
+        "risk_score",
+        "similarity_score","similarity_confidence","similarity_matches",
+        "similarity_volatility","similarity_strength","similarity_rank_pct",
+        "similarity_vs_median","high_confidence_similarity"
+    ]
+
 
     # =========================
     # walk-forward loop
@@ -425,8 +471,10 @@ if __name__ == "__main__":
     loop_iter = 0
     pred_frames = []
 
-    # master list of base vars + engineered features (regime dummies will be added per-iter)
-    base_features = stock_vars + engineered_cols_static
+    # master list of base vars + engineered features (regime dummies added per-iter)
+    # stock_vars are already rank-scaled; engineered & external features stay in native scale
+    base_features = stock_vars + engineered_cols_static + external_extra_features
+
 
 
     out_path = os.path.join(work_dir, "output.csv")
@@ -490,16 +538,28 @@ if __name__ == "__main__":
         # df_part[col] = df_part[col].fillna(df_part.groupby(date_col)[col].transform(lambda s: s.fillna(s.median())))
 
         for df_part in (train_df_reg, validate_df_reg, test_df_reg):
+            # Fill engineered features per-date
             for col in engineered_cols_static:
-                if col not in df_part.columns:
+                if col not in df_part.columns: 
                     continue
                 df_part[col] = df_part[col].fillna(
                     df_part.groupby(date_col)[col].transform(
                         lambda s: s.fillna(s.median(skipna=True)) if s.notna().any() else s.fillna(0.0)
                     )
                 )
-            # any remaining NAs → 0 as last resort
+            # NEW: Fill external similarity/risk features per-date
+            for col in external_extra_features:
+                if col not in df_part.columns: 
+                    continue
+                df_part[col] = df_part[col].fillna(
+                    df_part.groupby(date_col)[col].transform(
+                        lambda s: s.fillna(s.median(skipna=True)) if s.notna().any() else s.fillna(0.0)
+                    )
+                )
+            # last resort
             df_part[engineered_cols_static] = df_part[engineered_cols_static].fillna(0.0)
+            df_part[external_extra_features] = df_part[external_extra_features].fillna(0.0)
+
 
 
         # --- Standardize base numeric features on training only for linear model ---
