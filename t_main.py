@@ -135,56 +135,42 @@ def add_meta_features_v2(df, date_col, id_col, regime_col=None):
 
 
 
-def add_price_path_features(df: pd.DataFrame, id_col: str, date_col: str, ret_col: str, path_window: int) -> pd.DataFrame:
-    """
-    Vectorized rolling path descriptors per security. Avoids groupby.apply,
-    avoids Python lambdas inside rolling, and minimizes copies.
-    """
-    # Ensure sort for groupby.rolling
+def add_price_path_features(df, id_col, date_col, ret_col, path_window):
     df = df.sort_values([id_col, date_col]).copy()
 
-    # Work in float32 to cut memory in half with large panels
-    r = df[ret_col].astype('float32').fillna(0.0)
+    # Use only info available by end of month t:
+    # r_prev(t) = realized return for month t (which sits on the row dated t-1 in your schema),
+    # so shift stock_ret back to align past realized returns with current row.
+    r_prev = df.groupby(id_col)[ret_col].shift(1).astype('float32')
+    r_prev = r_prev.fillna(0.0)  # or leave NaN and handle with min_periods>1 below
 
-    # Handy index after groupby.rolling to align results back
-    g = df.groupby(id_col)[ret_col]
-
-    # ---- cumulative return over window: prod(1+r) - 1
-    # Use log-sum trick to avoid rolling apply:
-    # prod(1+r) - 1 = exp(sum(log1p(r))) - 1
-    log1p_r = np.log1p(r.replace(-1.0, -0.999999))  # guard at -1
-    roll_logsum = log1p_r.groupby(df[id_col]).rolling(path_window, min_periods=2).sum()
-    roll_logsum = roll_logsum.reset_index(level=0, drop=True)
+    # cumulative return over window
+    log1p_r = np.log1p(r_prev.clip(lower=-0.999999))
+    roll_logsum = log1p_r.groupby(df[id_col]).rolling(path_window, min_periods=2).sum().reset_index(level=0, drop=True)
     cumret = np.expm1(roll_logsum).astype('float32')
 
-    # ---- realized volatility (std of returns)
-    vol = r.groupby(df[id_col]).rolling(path_window, min_periods=2).std()
-    vol = vol.reset_index(level=0, drop=True).astype('float32')
+    # realized volatility / downside over window
+    vol = r_prev.groupby(df[id_col]).rolling(path_window, min_periods=2).std().reset_index(level=0, drop=True).astype('float32')
+    r_down = r_prev.clip(upper=0.0)
+    downside = r_down.groupby(df[id_col]).rolling(path_window, min_periods=2).std().reset_index(level=0, drop=True).astype('float32')
 
-    # ---- downside deviation (std of negative returns only)
-    r_down = r.clip(upper=0.0)
-    downside = r_down.groupby(df[id_col]).rolling(path_window, min_periods=2).std()
-    downside = downside.reset_index(level=0, drop=True).astype('float32')
-
-    # ---- sign changes (choppiness)
-    sgn = np.sign(r).replace({0.0: 0.0})
+    # sign-changes (choppiness)
+    sgn = np.sign(r_prev.replace(0.0, 0.0))
     sgn_shift = sgn.groupby(df[id_col]).shift(1)
     signchg_flag = (sgn != sgn_shift).astype('float32')
-    sign_changes = signchg_flag.groupby(df[id_col]).rolling(path_window, min_periods=2).sum()
-    sign_changes = sign_changes.reset_index(level=0, drop=True).astype('float32')
+    sign_changes = signchg_flag.groupby(df[id_col]).rolling(path_window, min_periods=2).sum().reset_index(level=0, drop=True).astype('float32')
 
-    # ---- simple path score
+    # simple path score
     path_score = cumret / (1.0 + vol.fillna(0.0) + 0.25 * sign_changes.fillna(0.0))
     path_score = path_score.astype('float32')
 
-    # Assign once (avoids per-group copies)
     df["pp_cumret_w"]   = cumret.values
     df["pp_vol_w"]      = vol.values
     df["pp_downside_w"] = downside.values
     df["pp_signchg_w"]  = sign_changes.values
     df["price_path"]    = path_score.values
-
     return df
+
 
 
 
@@ -323,95 +309,95 @@ if __name__ == "__main__":
     print(f"[{ts()}] Date coverage: {data0[date_col].min().date()} → {data0[date_col].max().date()}")
 
 
-    # === Merge per-id, per-date risk_score only ===
-    aux_path = os.path.join(work_dir, "data/text_based_risk_scores.csv")  # adjust to your file name
+    # # === Merge per-id, per-date risk_score only ===
+    # aux_path = os.path.join(work_dir, "data/text_based_risk_scores.csv")  # adjust to your file name
 
-    print(f"[{ts()}] Reading risk_score file: {aux_path}")
-    aux = pd.read_csv(aux_path, usecols=["id", "date_dt", "risk_score"])
+    # print(f"[{ts()}] Reading risk_score file: {aux_path}")
+    # aux = pd.read_csv(aux_path, usecols=["id", "date_dt", "risk_score"])
 
-    # Normalize date
-    aux["date_dt"] = parse_date_col(aux["date_dt"])
-    aux = aux.rename(columns={"date_dt": "date"})
-    aux["id"] = aux["id"].astype(str)
-    data0["id"] = data0["id"].astype(str)
+    # # Normalize date
+    # aux["date_dt"] = parse_date_col(aux["date_dt"])
+    # aux = aux.rename(columns={"date_dt": "date"})
+    # aux["id"] = aux["id"].astype(str)
+    # data0["id"] = data0["id"].astype(str)
 
-    # Deduplicate if necessary
-    aux = aux.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
+    # # Deduplicate if necessary
+    # aux = aux.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
 
-    # Merge risk_score into main data
-    pre_rows = len(data0)
-    data0 = data0.merge(aux, on=["id", "date"], how="left", validate="m:1")
-    post_rows = len(data0)
-    assert pre_rows == post_rows, "Row count changed unexpectedly after merge."
+    # # Merge risk_score into main data
+    # pre_rows = len(data0)
+    # data0 = data0.merge(aux, on=["id", "date"], how="left", validate="m:1")
+    # post_rows = len(data0)
+    # assert pre_rows == post_rows, "Row count changed unexpectedly after merge."
 
-    # Diagnostics
-    matched = data0["risk_score"].notna().sum()
-    print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
+    # # Diagnostics
+    # matched = data0["risk_score"].notna().sum()
+    # print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
 
-    # === NEW: Merge per-id, per-date SIMILARITY features ===
-    sim_path = os.path.join(work_dir, "data/similarity_scores.csv")
-    print(f"[{ts()}] Reading similarity features: {sim_path}")
+    # # === NEW: Merge per-id, per-date SIMILARITY features ===
+    # sim_path = os.path.join(work_dir, "data/similarity_scores.csv")
+    # print(f"[{ts()}] Reading similarity features: {sim_path}")
 
-    sim_usecols = [
-        "id","date",
-        "similarity_score","similarity_confidence","similarity_matches",
-        "similarity_volatility","similarity_strength","similarity_rank_pct",
-        "similarity_vs_median","high_confidence_similarity"
-    ]
-    sim = pd.read_csv(sim_path, usecols=sim_usecols)
+    # sim_usecols = [
+    #     "id","date",
+    #     "similarity_score","similarity_confidence","similarity_matches",
+    #     "similarity_volatility","similarity_strength","similarity_rank_pct",
+    #     "similarity_vs_median","high_confidence_similarity"
+    # ]
+    # sim = pd.read_csv(sim_path, usecols=sim_usecols)
 
-    # Normalize types
-    sim["date"] = parse_date_col(sim["date"])
-    sim["id"] = sim["id"].astype(str)
+    # # Normalize types
+    # sim["date"] = parse_date_col(sim["date"])
+    # sim["id"] = sim["id"].astype(str)
 
-    # (Optional but robust) coerce numerics
-    for c in sim.columns:
-        if c not in ("id","date"):
-            sim[c] = pd.to_numeric(sim[c], errors="coerce")
+    # # (Optional but robust) coerce numerics
+    # for c in sim.columns:
+    #     if c not in ("id","date"):
+    #         sim[c] = pd.to_numeric(sim[c], errors="coerce")
 
-    # Deduplicate (last wins)
-    sim = sim.sort_values(["id","date"]).drop_duplicates(["id","date"], keep="last")
+    # # Deduplicate (last wins)
+    # sim = sim.sort_values(["id","date"]).drop_duplicates(["id","date"], keep="last")
 
-    # Merge
-    pre_rows = len(data0)
-    data0 = data0.merge(sim, on=["id","date"], how="left", validate="m:1")
-    post_rows = len(data0)
-    assert pre_rows == post_rows, "Row count changed unexpectedly after similarity merge."
+    # # Merge
+    # pre_rows = len(data0)
+    # data0 = data0.merge(sim, on=["id","date"], how="left", validate="m:1")
+    # post_rows = len(data0)
+    # assert pre_rows == post_rows, "Row count changed unexpectedly after similarity merge."
 
-    # Diagnostics
-    sim_cols = [c for c in sim_usecols if c not in ("id","date")]
-    sim_match_any = data0[sim_cols].notna().any(axis=1).sum()
-    sim_match_main = data0["similarity_score"].notna().sum()
-    print(f"[{ts()}] similarity_* merged: any-feature matched {sim_match_any:,} rows; "
-        f"similarity_score matched {sim_match_main:,} rows.")
+    # # Diagnostics
+    # sim_cols = [c for c in sim_usecols if c not in ("id","date")]
+    # sim_match_any = data0[sim_cols].notna().any(axis=1).sum()
+    # sim_match_main = data0["similarity_score"].notna().sum()
+    # print(f"[{ts()}] similarity_* merged: any-feature matched {sim_match_any:,} rows; "
+    #     f"similarity_score matched {sim_match_main:,} rows.")
 
 
 
-    missing_factors = [v for v in stock_vars if v not in data0.columns]
-    if missing_factors:
-        raise KeyError(f"Missing factor(s) in data: {missing_factors[:10]}{' …' if len(missing_factors)>10 else ''}")
+    # missing_factors = [v for v in stock_vars if v not in data0.columns]
+    # if missing_factors:
+    #     raise KeyError(f"Missing factor(s) in data: {missing_factors[:10]}{' …' if len(missing_factors)>10 else ''}")
 
-    # --- monthly rank-scaling to [-1,1] ---
-    print(f"[{ts()}] Grouping cross-sections by '{date_col}' and rank-scaling to [-1,1] per month")
-    monthly = data0.groupby(date_col, sort=True)
-    chunks = []
-    for m_i, (date_val, monthly_raw) in enumerate(monthly, start=1):
-        group = monthly_raw.copy()
-        zeroed_vars_this_month = 0
-        for var in stock_vars:
-            med = group[var].median(skipna=True)
-            group[var] = group[var].fillna(med)
-            group[var] = group[var].rank(method="dense") - 1
-            gmax = group[var].max()
-            if pd.isna(gmax) or gmax <= 0:
-                group[var] = 0
-                zeroed_vars_this_month += 1
-            else:
-                group[var] = (group[var] / gmax) * 2 - 1
-        chunks.append(group)
-        if m_i <= 3 or m_i % 12 == 0:
-            print(f"[{ts()}] {date_val.date()} | zeroed vars={zeroed_vars_this_month}")
-    data = pd.concat(chunks, ignore_index=True)
+    # # --- monthly rank-scaling to [-1,1] ---
+    # print(f"[{ts()}] Grouping cross-sections by '{date_col}' and rank-scaling to [-1,1] per month")
+    # monthly = data0.groupby(date_col, sort=True)
+    # chunks = []
+    # for m_i, (date_val, monthly_raw) in enumerate(monthly, start=1):
+    #     group = monthly_raw.copy()
+    #     zeroed_vars_this_month = 0
+    #     for var in stock_vars:
+    #         med = group[var].median(skipna=True)
+    #         group[var] = group[var].fillna(med)
+    #         group[var] = group[var].rank(method="dense") - 1
+    #         gmax = group[var].max()
+    #         if pd.isna(gmax) or gmax <= 0:
+    #             group[var] = 0
+    #             zeroed_vars_this_month += 1
+    #         else:
+    #             group[var] = (group[var] / gmax) * 2 - 1
+    #     chunks.append(group)
+    #     if m_i <= 3 or m_i % 12 == 0:
+    #         print(f"[{ts()}] {date_val.date()} | zeroed vars={zeroed_vars_this_month}")
+    # data = pd.concat(chunks, ignore_index=True)
 
 
     # --- leak-safe rolling features computed once (do *not* use future info) ---
@@ -424,23 +410,23 @@ if __name__ == "__main__":
         path_window=6,
     )
 
-    print(hrule("-"))
-    print(f"[{ts()}] Computing leak-safe rolling PRICE PATH features (window={cfg.path_window})…")
-    data = add_price_path_features(data, id_col=id_col, date_col=date_col, ret_col=ret_var, path_window=cfg.path_window)
+    # print(hrule("-"))
+    # print(f"[{ts()}] Computing leak-safe rolling PRICE PATH features (window={cfg.path_window})…")
+    # data = add_price_path_features(data, id_col=id_col, date_col=date_col, ret_col=ret_var, path_window=cfg.path_window)
 
-    print(f"[{ts()}] Computing FACTOR MOMENTUM features (vars={len(cfg.momentum_vars)}, window={cfg.momentum_window})…")
-    data = add_factor_momentum(data, date_col=date_col, ret_col=ret_var, vars_=cfg.momentum_vars, window=cfg.momentum_window)
+    # print(f"[{ts()}] Computing FACTOR MOMENTUM features (vars={len(cfg.momentum_vars)}, window={cfg.momentum_window})…")
+    # data = add_factor_momentum(data, date_col=date_col, ret_col=ret_var, vars_=cfg.momentum_vars, window=cfg.momentum_window)
 
-    print(f"[{ts()}] Computing META features (v2 transforms)…")
-    data = add_meta_features_v2(data, date_col=date_col, id_col=id_col)
+    # print(f"[{ts()}] Computing META features (v2 transforms)…")
+    # data = add_meta_features_v2(data, date_col=date_col, id_col=id_col)
 
     ####Comment this section to run without the saved file ###############
     rankscaled_path = os.path.join(work_dir, "data/rank_scaled.parquet")
-    print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
-    data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
+    # print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
+    # data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
 
-    # data = pd.read_parquet(rankscaled_path, engine="pyarrow")
-    # print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
+    data = pd.read_parquet(rankscaled_path, engine="pyarrow")
+    print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
     ####End of comment section to run without the saved file ###############
 
 
@@ -496,7 +482,7 @@ if __name__ == "__main__":
 
         loop_iter += 1
         # ✅ Skip until the 7th iteration OR after a certain year
-        if loop_iter < 8:
+        if loop_iter < 2:
             counter += 1
             continue
 
