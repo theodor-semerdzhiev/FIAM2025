@@ -16,6 +16,7 @@ PERCENTILE = 1                 # use top/bottom PERCENTILE% as initial threshold
 # ------------------------------
 # Load predictions (must include: date, year, month, id, stock_ret, and MODEL_COL)
 # ------------------------------
+print("uheloo")
 pred = pd.read_csv(PRED_PATH, parse_dates=["date"])
 
 # Safety: ensure year/month exist (derive from 'date' if needed)
@@ -167,8 +168,11 @@ print("Sharpe Ratio (L-S):", sharpe)
 mkt = pd.read_csv("data/mkt_ind.csv")  # expected columns: year, month, ret, rf
 monthly_port = monthly_port.merge(mkt, how="inner", on=["year", "month"])
 monthly_port["mkt_rf"] = monthly_port["ret"] - monthly_port["rf"]
+# Create excess return for the long-short portfolio
+monthly_port["port_ls_rf"] = monthly_port["port_ls"] - monthly_port["rf"]
 
-nw_ols = sm.ols("port_ls ~ mkt_rf", data=monthly_port).fit(
+# Now regress excess returns on both sides
+nw_ols = sm.ols("port_ls_rf ~ mkt_rf", data=monthly_port).fit(
     cov_type="HAC", cov_kwds={"maxlags": 3}, use_t=True
 )
 print(nw_ols.summary())
