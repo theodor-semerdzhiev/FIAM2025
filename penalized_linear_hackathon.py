@@ -14,11 +14,11 @@ if __name__ == "__main__":
     pd.set_option("mode.chained_assignment", None)
 
     # set working directory
-    work_dir = "Your working directory"
+    work_dir = "/Users/loading.../Documents/Projects/FIAM2025"
 
     # read sample data
     file_path = os.path.join(
-        work_dir, "sample_data.csv"
+        work_dir, "data/ret_sample.csv"
     )  # replace with the correct file name
     raw = pd.read_csv(
         file_path, parse_dates=["ret_eom"], low_memory=False
@@ -36,6 +36,7 @@ if __name__ == "__main__":
         raw[ret_var].notna()
     ].copy()  # create a copy of the data and make sure the left hand side is not missing
 
+    print("hello")
     # transform each variable in each month to the same scale
     monthly = new_set.groupby("date")
     data = pd.DataFrame()

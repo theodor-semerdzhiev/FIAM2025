@@ -5,12 +5,12 @@ from pandas.tseries.offsets import *
 
 
 # read predcited values
-pred_path = "Your predicted values path"
+pred_path = "output.csv"
 pred = pd.read_csv(pred_path, parse_dates=["date"])
 # pred.columns = map(str.lower, pred.columns)
 
 # select model (ridge as an example)
-model = "ridge"
+model = "blend"
 
 # sort stocks into deciles (10 portfolios) each month based on the predicted returns and calculate portfolio returns
 # portfolio 1 is the decile with the lowest predicted returns, portfolio 10 is the decile with the highest predicted returns
@@ -41,13 +41,18 @@ print("Sharpe Ratio:", sharpe)
 
 # Calculate the CAPM Alpha for the long-short Portfolio
 # you can use the same formula to calculate the Sharpe ratio for the long and short portfolios separately
-mkt_path = "Your market factor path"
-mkt = pd.read_csv(mkt_path)
+mkt = pd.read_csv("data/mkt_ind.csv")
+
+# merge
 monthly_port = monthly_port.merge(mkt, how="inner", on=["year", "month"])
-# Newy-West regression for heteroskedasticity and autocorrelation robust standard errors
-nw_ols = sm.ols(formula="port_11 ~ mkt_rf", data=monthly_port).fit(
+
+# market excess return = market - risk-free
+monthly_port["mkt_rf"] = monthly_port["ret"] - monthly_port["rf"]
+
+nw_ols = sm.ols("port_11 ~ mkt_rf", data=monthly_port).fit(
     cov_type="HAC", cov_kwds={"maxlags": 3}, use_t=True
 )
+
 print(nw_ols.summary())
 
 # Specifically, the alpha, t-statistic, and Information ratio are:
@@ -106,6 +111,7 @@ def turnover_count(df):
 
 
 long_positions = pred[pred["rank"] == 9]
+print(len(long_positions))
 short_positions = pred[pred["rank"] == 0]
 print("Long Portfolio Turnover:", turnover_count(long_positions))
 print("Short Portfolio Turnover:", turnover_count(short_positions))
