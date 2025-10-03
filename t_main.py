@@ -309,132 +309,132 @@ if __name__ == "__main__":
     print(f"[{ts()}] Date coverage: {data0[date_col].min().date()} → {data0[date_col].max().date()}")
 
 
-    # === NEW: Merge per-id, per-date MGMT_PRED feature (same spot as risk/similarity) ===
-    mgmt_path = os.path.join(work_dir, "data/mgmt_pred_feature.parquet")
-    print(f"[{ts()}] Reading mgmt_pred features: {mgmt_path}")
+    # # === NEW: Merge per-id, per-date MGMT_PRED feature (same spot as risk/similarity) ===
+    # mgmt_path = os.path.join(work_dir, "data/mgmt_pred_feature.parquet")
+    # print(f"[{ts()}] Reading mgmt_pred features: {mgmt_path}")
 
-    # Expecting columns: id, date, mgmt_pred (gvkey may be present but not required)
-    mgmt = pd.read_parquet(mgmt_path, engine="pyarrow")
+    # # Expecting columns: id, date, mgmt_pred (gvkey may be present but not required)
+    # mgmt = pd.read_parquet(mgmt_path, engine="pyarrow")
 
-    # Keep needed cols
-    need_cols = ["id", "date", "mgmt_pred"]
-    missing = [c for c in need_cols if c not in mgmt.columns]
-    if missing:
-        raise KeyError(f"mgmt_pred_feature.parquet missing columns: {missing}")
+    # # Keep needed cols
+    # need_cols = ["id", "date", "mgmt_pred"]
+    # missing = [c for c in need_cols if c not in mgmt.columns]
+    # if missing:
+    #     raise KeyError(f"mgmt_pred_feature.parquet missing columns: {missing}")
 
-    mgmt = mgmt[need_cols].copy()
+    # mgmt = mgmt[need_cols].copy()
 
-    # Normalize types to match main
-    mgmt["date"] = parse_date_col(mgmt["date"])
-    mgmt["id"] = mgmt["id"].astype(str)
-    mgmt["mgmt_pred"] = pd.to_numeric(mgmt["mgmt_pred"], errors="coerce")
+    # # Normalize types to match main
+    # mgmt["date"] = parse_date_col(mgmt["date"])
+    # mgmt["id"] = mgmt["id"].astype(str)
+    # mgmt["mgmt_pred"] = pd.to_numeric(mgmt["mgmt_pred"], errors="coerce")
 
-    # Deduplicate last-by-time
-    mgmt = mgmt.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
+    # # Deduplicate last-by-time
+    # mgmt = mgmt.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
 
-    # Ensure main keys are aligned
-    data0["id"] = data0["id"].astype(str)
+    # # Ensure main keys are aligned
+    # data0["id"] = data0["id"].astype(str)
 
-    # Merge m:1 on (id,date)
-    pre_rows = len(data0)
-    data0 = data0.merge(mgmt, on=["id", "date"], how="left", validate="m:1")
-    post_rows = len(data0)
-    assert pre_rows == post_rows, "Row count changed unexpectedly after mgmt_pred merge."
+    # # Merge m:1 on (id,date)
+    # pre_rows = len(data0)
+    # data0 = data0.merge(mgmt, on=["id", "date"], how="left", validate="m:1")
+    # post_rows = len(data0)
+    # assert pre_rows == post_rows, "Row count changed unexpectedly after mgmt_pred merge."
 
-    matched_mgmt = data0["mgmt_pred"].notna().sum()
-    print(f"[{ts()}] mgmt_pred merged: matched {matched_mgmt:,} of {len(data0):,} rows.")
-    # === END mgmt_pred merge ===
-
-
-    # === Merge per-id, per-date risk_score only ===
-    aux_path = os.path.join(work_dir, "data/text_based_risk_scores.csv")  # adjust to your file name
-
-    print(f"[{ts()}] Reading risk_score file: {aux_path}")
-    aux = pd.read_csv(aux_path, usecols=["id", "date_dt", "risk_score"])
-
-    # Normalize date
-    aux["date_dt"] = parse_date_col(aux["date_dt"])
-    aux = aux.rename(columns={"date_dt": "date"})
-    aux["id"] = aux["id"].astype(str)
-    data0["id"] = data0["id"].astype(str)
-
-    # Deduplicate if necessary
-    aux = aux.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
-
-    # Merge risk_score into main data
-    pre_rows = len(data0)
-    data0 = data0.merge(aux, on=["id", "date"], how="left", validate="m:1")
-    post_rows = len(data0)
-    assert pre_rows == post_rows, "Row count changed unexpectedly after merge."
-
-    # Diagnostics
-    matched = data0["risk_score"].notna().sum()
-    print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
-
-    # === NEW: Merge per-id, per-date SIMILARITY features ===
-    sim_path = os.path.join(work_dir, "data/similarity_scores.csv")
-    print(f"[{ts()}] Reading similarity features: {sim_path}")
-
-    sim_usecols = [
-        "id","date",
-        "similarity_score","similarity_confidence","similarity_matches",
-        "similarity_volatility","similarity_strength","similarity_rank_pct",
-        "similarity_vs_median","high_confidence_similarity"
-    ]
-    sim = pd.read_csv(sim_path, usecols=sim_usecols)
-
-    # Normalize types
-    sim["date"] = parse_date_col(sim["date"])
-    sim["id"] = sim["id"].astype(str)
-
-    # (Optional but robust) coerce numerics
-    for c in sim.columns:
-        if c not in ("id","date"):
-            sim[c] = pd.to_numeric(sim[c], errors="coerce")
-
-    # Deduplicate (last wins)
-    sim = sim.sort_values(["id","date"]).drop_duplicates(["id","date"], keep="last")
-
-    # Merge
-    pre_rows = len(data0)
-    data0 = data0.merge(sim, on=["id","date"], how="left", validate="m:1")
-    post_rows = len(data0)
-    assert pre_rows == post_rows, "Row count changed unexpectedly after similarity merge."
-
-    # Diagnostics
-    sim_cols = [c for c in sim_usecols if c not in ("id","date")]
-    sim_match_any = data0[sim_cols].notna().any(axis=1).sum()
-    sim_match_main = data0["similarity_score"].notna().sum()
-    print(f"[{ts()}] similarity_* merged: any-feature matched {sim_match_any:,} rows; "
-        f"similarity_score matched {sim_match_main:,} rows.")
+    # matched_mgmt = data0["mgmt_pred"].notna().sum()
+    # print(f"[{ts()}] mgmt_pred merged: matched {matched_mgmt:,} of {len(data0):,} rows.")
+    # # === END mgmt_pred merge ===
 
 
+    # # === Merge per-id, per-date risk_score only ===
+    # aux_path = os.path.join(work_dir, "data/text_based_risk_scores.csv")  # adjust to your file name
 
-    missing_factors = [v for v in stock_vars if v not in data0.columns]
-    if missing_factors:
-        raise KeyError(f"Missing factor(s) in data: {missing_factors[:10]}{' …' if len(missing_factors)>10 else ''}")
+    # print(f"[{ts()}] Reading risk_score file: {aux_path}")
+    # aux = pd.read_csv(aux_path, usecols=["id", "date_dt", "risk_score"])
 
-    # --- monthly rank-scaling to [-1,1] ---
-    print(f"[{ts()}] Grouping cross-sections by '{date_col}' and rank-scaling to [-1,1] per month")
-    monthly = data0.groupby(date_col, sort=True)
-    chunks = []
-    for m_i, (date_val, monthly_raw) in enumerate(monthly, start=1):
-        group = monthly_raw.copy()
-        zeroed_vars_this_month = 0
-        for var in stock_vars:
-            med = group[var].median(skipna=True)
-            group[var] = group[var].fillna(med)
-            group[var] = group[var].rank(method="dense") - 1
-            gmax = group[var].max()
-            if pd.isna(gmax) or gmax <= 0:
-                group[var] = 0
-                zeroed_vars_this_month += 1
-            else:
-                group[var] = (group[var] / gmax) * 2 - 1
-        chunks.append(group)
-        if m_i <= 3 or m_i % 12 == 0:
-            print(f"[{ts()}] {date_val.date()} | zeroed vars={zeroed_vars_this_month}")
-    data = pd.concat(chunks, ignore_index=True)
+    # # Normalize date
+    # aux["date_dt"] = parse_date_col(aux["date_dt"])
+    # aux = aux.rename(columns={"date_dt": "date"})
+    # aux["id"] = aux["id"].astype(str)
+    # data0["id"] = data0["id"].astype(str)
+
+    # # Deduplicate if necessary
+    # aux = aux.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
+
+    # # Merge risk_score into main data
+    # pre_rows = len(data0)
+    # data0 = data0.merge(aux, on=["id", "date"], how="left", validate="m:1")
+    # post_rows = len(data0)
+    # assert pre_rows == post_rows, "Row count changed unexpectedly after merge."
+
+    # # Diagnostics
+    # matched = data0["risk_score"].notna().sum()
+    # print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
+
+    # # === NEW: Merge per-id, per-date SIMILARITY features ===
+    # sim_path = os.path.join(work_dir, "data/similarity_scores.csv")
+    # print(f"[{ts()}] Reading similarity features: {sim_path}")
+
+    # sim_usecols = [
+    #     "id","date",
+    #     "similarity_score","similarity_confidence","similarity_matches",
+    #     "similarity_volatility","similarity_strength","similarity_rank_pct",
+    #     "similarity_vs_median","high_confidence_similarity"
+    # ]
+    # sim = pd.read_csv(sim_path, usecols=sim_usecols)
+
+    # # Normalize types
+    # sim["date"] = parse_date_col(sim["date"])
+    # sim["id"] = sim["id"].astype(str)
+
+    # # (Optional but robust) coerce numerics
+    # for c in sim.columns:
+    #     if c not in ("id","date"):
+    #         sim[c] = pd.to_numeric(sim[c], errors="coerce")
+
+    # # Deduplicate (last wins)
+    # sim = sim.sort_values(["id","date"]).drop_duplicates(["id","date"], keep="last")
+
+    # # Merge
+    # pre_rows = len(data0)
+    # data0 = data0.merge(sim, on=["id","date"], how="left", validate="m:1")
+    # post_rows = len(data0)
+    # assert pre_rows == post_rows, "Row count changed unexpectedly after similarity merge."
+
+    # # Diagnostics
+    # sim_cols = [c for c in sim_usecols if c not in ("id","date")]
+    # sim_match_any = data0[sim_cols].notna().any(axis=1).sum()
+    # sim_match_main = data0["similarity_score"].notna().sum()
+    # print(f"[{ts()}] similarity_* merged: any-feature matched {sim_match_any:,} rows; "
+    #     f"similarity_score matched {sim_match_main:,} rows.")
+
+
+
+    # missing_factors = [v for v in stock_vars if v not in data0.columns]
+    # if missing_factors:
+    #     raise KeyError(f"Missing factor(s) in data: {missing_factors[:10]}{' …' if len(missing_factors)>10 else ''}")
+
+    # # --- monthly rank-scaling to [-1,1] ---
+    # print(f"[{ts()}] Grouping cross-sections by '{date_col}' and rank-scaling to [-1,1] per month")
+    # monthly = data0.groupby(date_col, sort=True)
+    # chunks = []
+    # for m_i, (date_val, monthly_raw) in enumerate(monthly, start=1):
+    #     group = monthly_raw.copy()
+    #     zeroed_vars_this_month = 0
+    #     for var in stock_vars:
+    #         med = group[var].median(skipna=True)
+    #         group[var] = group[var].fillna(med)
+    #         group[var] = group[var].rank(method="dense") - 1
+    #         gmax = group[var].max()
+    #         if pd.isna(gmax) or gmax <= 0:
+    #             group[var] = 0
+    #             zeroed_vars_this_month += 1
+    #         else:
+    #             group[var] = (group[var] / gmax) * 2 - 1
+    #     chunks.append(group)
+    #     if m_i <= 3 or m_i % 12 == 0:
+    #         print(f"[{ts()}] {date_val.date()} | zeroed vars={zeroed_vars_this_month}")
+    # data = pd.concat(chunks, ignore_index=True)
 
 
     # --- leak-safe rolling features computed once (do *not* use future info) ---
@@ -447,23 +447,23 @@ if __name__ == "__main__":
         path_window=6,
     )
 
-    print(hrule("-"))
-    print(f"[{ts()}] Computing leak-safe rolling PRICE PATH features (window={cfg.path_window})…")
-    data = add_price_path_features(data, id_col=id_col, date_col=date_col, ret_col=ret_var, path_window=cfg.path_window)
+    # print(hrule("-"))
+    # print(f"[{ts()}] Computing leak-safe rolling PRICE PATH features (window={cfg.path_window})…")
+    # data = add_price_path_features(data, id_col=id_col, date_col=date_col, ret_col=ret_var, path_window=cfg.path_window)
 
-    print(f"[{ts()}] Computing FACTOR MOMENTUM features (vars={len(cfg.momentum_vars)}, window={cfg.momentum_window})…")
-    data = add_factor_momentum(data, date_col=date_col, ret_col=ret_var, vars_=cfg.momentum_vars, window=cfg.momentum_window)
+    # print(f"[{ts()}] Computing FACTOR MOMENTUM features (vars={len(cfg.momentum_vars)}, window={cfg.momentum_window})…")
+    # data = add_factor_momentum(data, date_col=date_col, ret_col=ret_var, vars_=cfg.momentum_vars, window=cfg.momentum_window)
 
-    print(f"[{ts()}] Computing META features (v2 transforms)…")
-    data = add_meta_features_v2(data, date_col=date_col, id_col=id_col)
+    # print(f"[{ts()}] Computing META features (v2 transforms)…")
+    # data = add_meta_features_v2(data, date_col=date_col, id_col=id_col)
 
     ####Comment this section to run without the saved file ###############
     rankscaled_path = os.path.join(work_dir, "data/rank_scaled.parquet")
-    print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
-    data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
+    # print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
+    # data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
 
-    # data = pd.read_parquet(rankscaled_path, engine="pyarrow")
-    # print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
+    data = pd.read_parquet(rankscaled_path, engine="pyarrow")
+    print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
     ####End of comment section to run without the saved file ###############
 
 
@@ -479,8 +479,10 @@ if __name__ == "__main__":
         "risk_score",
         "similarity_score","similarity_confidence","similarity_matches",
         "similarity_volatility","similarity_strength","similarity_rank_pct",
-        "similarity_vs_median","high_confidence_similarity"
+        "similarity_vs_median","high_confidence_similarity",
+        "mgmt_pred"
     ]
+
 
 
     # =========================
@@ -519,7 +521,7 @@ if __name__ == "__main__":
 
         loop_iter += 1
         # ✅ Skip until the 7th iteration OR after a certain year
-        if loop_iter < 3:
+        if loop_iter < 9:
             counter += 1
             continue
 
@@ -550,6 +552,21 @@ if __name__ == "__main__":
         train_df_reg, artifacts = fit_predict_regime(train_df, train_df, cfg.regime_vars, cfg.regime_k, cfg.regime_pca_components)
         validate_df_reg, _ = fit_predict_regime(train_df, validate_df, cfg.regime_vars, cfg.regime_k, cfg.regime_pca_components)
         test_df_reg, _ = fit_predict_regime(train_df, test_df, cfg.regime_vars, cfg.regime_k, cfg.regime_pca_components)
+
+        # --- SIMPLE: winsorize target using train-only thresholds (no leakage) ---
+        def winsorize_target(train_df, val_df, test_df, ret_col, lower=0.01, upper=0.99):
+            lo, hi = train_df[ret_col].quantile([lower, upper]).values
+            for df in (train_df, val_df, test_df):
+                df[ret_col] = df[ret_col].clip(lo, hi)
+            return float(lo), float(hi)
+
+        # Place this right after you've prepared train_df_reg / validate_df_reg / test_df_reg
+        lo_cap, hi_cap = winsorize_target(
+            train_df_reg, validate_df_reg, test_df_reg,
+            ret_col=ret_var, lower=0.01, upper=0.99
+        )
+        print(f"[{ts()}] Winsorized {ret_var} at 1%/99% using train-only caps: lo={lo_cap:.6f}, hi={hi_cap:.6f}")
+
 
         regime_dummy_cols = [c for c in train_df_reg.columns if c.startswith("regime_")]
 
@@ -722,6 +739,19 @@ if __name__ == "__main__":
         blend_mse_test = mean_squared_error(Y_test, blend_test)
         print(f"[{ts()}] BLEND: Test MSE={blend_mse_test:.8f}")
 
+        # ADD THESE LINES after the IC calculation:
+        sign_correct = (np.sign(blend_test) == np.sign(Y_test)).mean()
+        ic_spearman = pd.Series(blend_test).corr(pd.Series(Y_test), method='spearman')
+        print(f"[{ts()}] Sign Accuracy: {sign_correct:.3f} | Spearman IC: {ic_spearman:.4f}")
+
+        # R² calculations per iteration
+        denom = np.sum(np.square(Y_test))
+        r2_ridge = 1 - np.sum(np.square(Y_test - preds_ridge_test)) / denom if denom != 0 else np.nan
+        r2_xgb = 1 - np.sum(np.square(Y_test - preds_xgb_test)) / denom if denom != 0 else np.nan
+        r2_cat = 1 - np.sum(np.square(Y_test - preds_cat_test)) / denom if denom != 0 else np.nan
+        r2_blend = 1 - np.sum(np.square(Y_test - blend_test)) / denom if denom != 0 else np.nan
+
+        print(f"[{ts()}] R² (vs zero) -> Ridge: {r2_ridge:.6f} | XGB: {r2_xgb:.6f} | Cat: {r2_cat:.6f} | Blend: {r2_blend:.6f}")
 
         reg_pred["iter"] = loop_iter
         reg_pred["train_start"] = c0.date()
