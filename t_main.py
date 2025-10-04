@@ -274,6 +274,10 @@ if __name__ == "__main__":
     file_path = os.path.join(work_dir, "data/ret_sample.parquet")
     print(f"[{ts()}] Reading returns data (parquet): {file_path}")
     raw = pd.read_parquet(file_path, engine="pyarrow")
+    # NEW: force float32 to cut memory
+    _float64_cols = raw.select_dtypes(include=["float64"]).columns
+    if len(_float64_cols) > 0:
+        raw[_float64_cols] = raw[_float64_cols].astype("float32")
 
     print(f"[{ts()}] raw shape: {raw.shape}; columns: {len(raw.columns)}")
 
@@ -463,6 +467,11 @@ if __name__ == "__main__":
     # data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
 
     data = pd.read_parquet(rankscaled_path, engine="pyarrow")
+    # NEW: force float32 to cut memory
+    _float64_cols_cache = data.select_dtypes(include=["float64"]).columns
+    if len(_float64_cols_cache) > 0:
+        data[_float64_cols_cache] = data[_float64_cols_cache].astype("float32")
+
     print(f"[{ts()}] Loaded cached rank-scaled data, shape={data.shape}")
     ####End of comment section to run without the saved file ###############
 
@@ -521,7 +530,7 @@ if __name__ == "__main__":
 
         loop_iter += 1
         # ✅ Skip until the 7th iteration OR after a certain year
-        if loop_iter < 9:
+        if loop_iter < 10:
             counter += 1
             continue
 
@@ -605,17 +614,17 @@ if __name__ == "__main__":
         # --- Standardize base numeric features on training only for linear model ---
         print(f"[{ts()}] Fitting StandardScaler on training features…")
         scaler = StandardScaler().fit(train_df_reg[feat_cols])
-        train_std = train_df_reg.copy(); train_std[feat_cols] = scaler.transform(train_df_reg[feat_cols])
-        val_std   = validate_df_reg.copy(); val_std[feat_cols]   = scaler.transform(validate_df_reg[feat_cols])
-        test_std  = test_df_reg.copy();  test_std[feat_cols]  = scaler.transform(test_df_reg[feat_cols])
+        train_std = train_df_reg.copy(); train_std[feat_cols] = scaler.transform(train_df_reg[feat_cols]).astype(np.float32)  # NEW: force float32 to cut memory
+        val_std   = validate_df_reg.copy(); val_std[feat_cols]   = scaler.transform(validate_df_reg[feat_cols]).astype(np.float32)  # NEW: force float32 to cut memory
+        test_std  = test_df_reg.copy();  test_std[feat_cols]  = scaler.transform(test_df_reg[feat_cols]).astype(np.float32)  # NEW: force float32 to cut memory
 
         # --- arrays ---
-        X_train = train_std[feat_cols].values
-        Y_train = train_std[ret_var].values
-        X_val   = val_std[feat_cols].values
-        Y_val   = val_std[ret_var].values
-        X_test  = test_std[feat_cols].values
-        Y_test  = test_std[ret_var].values
+        X_train = train_std[feat_cols].to_numpy(dtype=np.float32, copy=False)  # NEW: force float32 to cut memory
+        Y_train = train_std[ret_var].to_numpy(dtype=np.float32, copy=False)    # NEW: force float32 to cut memory
+        X_val   = val_std[feat_cols].to_numpy(dtype=np.float32, copy=False)    # NEW: force float32 to cut memory
+        Y_val   = val_std[ret_var].to_numpy(dtype=np.float32, copy=False)      # NEW: force float32 to cut memory
+        X_test  = test_std[feat_cols].to_numpy(dtype=np.float32, copy=False)   # NEW: force float32 to cut memory
+        Y_test  = test_std[ret_var].to_numpy(dtype=np.float32, copy=False)     # NEW: force float32 to cut memory
 
         # ...existing code...
         print(f"Y_train: min={np.min(Y_train)}, max={np.max(Y_train)}, mean={np.mean(Y_train)}, std={np.std(Y_train)}")
@@ -632,7 +641,7 @@ if __name__ == "__main__":
         # =========================
         print(f"[{ts()}] RIDGE: tuning alpha over 10^[-1, ..., 8] (x0.5) step=0.2")
         lambdas = np.arange(-1, 8.1, 0.2)
-        val_mse_ridge = np.zeros(len(lambdas))
+        val_mse_ridge = np.zeros(len(lambdas), dtype=np.float32)  # NEW: force float32 to cut memory
         t_ridge0 = time.perf_counter()
         Y_train_dm = Y_train - np.mean(Y_train)
         for ind, i in enumerate(lambdas):
