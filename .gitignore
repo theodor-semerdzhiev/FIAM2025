@@ -1,6 +1,9 @@
 ret_sample.csv
 *.csv
 \data
+.venv
+\*.log
+*.log
 \embedding_batches
 *.json
 data_exploration.ipynb
