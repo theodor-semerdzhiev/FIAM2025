@@ -530,7 +530,7 @@ if __name__ == "__main__":
 
         loop_iter += 1
         # ✅ Skip until the 7th iteration OR after a certain year
-        if loop_iter < 10:
+        if loop_iter < 1:
             counter += 1
             continue
 
