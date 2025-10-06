@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-file = "/Users/loading.../Documents/Projects/FIAM2025/data/ret_sample.csv"
+file = r"C:\_Files\Personal\Projects\FIAM\FIAM2025\data\ret_sample.parquet"
 chunksize = 1_000_000
 
 # --- Step 1: Count rows ---
