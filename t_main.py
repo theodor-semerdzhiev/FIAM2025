@@ -13,6 +13,12 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from xgboost.callback import EarlyStopping
 
+# --- ADDED: plotting backend for headless environments ---
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+# --------------------------------------------------------
+
 # --- third-party boosters ---
 try:
     from xgboost import XGBRegressor
@@ -530,7 +536,7 @@ if __name__ == "__main__":
 
         loop_iter += 1
         # ✅ Skip until the 7th iteration OR after a certain year
-        if loop_iter < 1:
+        if loop_iter < 11:
             counter += 1
             continue
 
@@ -561,21 +567,6 @@ if __name__ == "__main__":
         train_df_reg, artifacts = fit_predict_regime(train_df, train_df, cfg.regime_vars, cfg.regime_k, cfg.regime_pca_components)
         validate_df_reg, _ = fit_predict_regime(train_df, validate_df, cfg.regime_vars, cfg.regime_k, cfg.regime_pca_components)
         test_df_reg, _ = fit_predict_regime(train_df, test_df, cfg.regime_vars, cfg.regime_k, cfg.regime_pca_components)
-
-        # --- SIMPLE: winsorize target using train-only thresholds (no leakage) ---
-        def winsorize_target(train_df, val_df, test_df, ret_col, lower=0.01, upper=0.99):
-            lo, hi = train_df[ret_col].quantile([lower, upper]).values
-            for df in (train_df, val_df, test_df):
-                df[ret_col] = df[ret_col].clip(lo, hi)
-            return float(lo), float(hi)
-
-        # Place this right after you've prepared train_df_reg / validate_df_reg / test_df_reg
-        lo_cap, hi_cap = winsorize_target(
-            train_df_reg, validate_df_reg, test_df_reg,
-            ret_col=ret_var, lower=0.01, upper=0.99
-        )
-        print(f"[{ts()}] Winsorized {ret_var} at 1%/99% using train-only caps: lo={lo_cap:.6f}, hi={hi_cap:.6f}")
-
 
         regime_dummy_cols = [c for c in train_df_reg.columns if c.startswith("regime_")]
 
@@ -697,6 +688,50 @@ if __name__ == "__main__":
         print(f"[{ts()}] XGBoost: best_iteration={xgb.best_iteration} | Val MSE={xgb_mse_val:.8f} | Test MSE={xgb_mse_test:.8f} | time={t_xgb1 - t_xgb0:,.2f}s")
 
         # =========================
+        # ADDED: XGBoost Feature Importance (per-iteration Top-20)
+        # =========================
+        try:
+            # Ensure output dirs exist
+            fi_dir = os.path.join(work_dir, "feature_importance")
+            os.makedirs(fi_dir, exist_ok=True)
+
+            # Map XGBoost's f{idx} back to your column names (order = feat_cols)
+            fmap = {f"f{i}": feat_cols[i] for i in range(len(feat_cols))}
+
+            # Choose importance metric: 'gain' (avg gain), alternatives: 'weight','cover','total_gain','total_cover'
+            raw_score = xgb.get_booster().get_score(importance_type="gain")
+
+            # Replace keys with real feature names and build a Series
+            if len(raw_score) == 0:
+                print(f"[{ts()}] WARNING: XGB returned empty importance; skipping plot.")
+            else:
+                imp = pd.Series({fmap.get(k, k): v for k, v in raw_score.items()}, dtype="float64")
+                imp = imp.sort_values(ascending=False)
+                topk = imp.head(20)
+
+                # Save CSV per iteration
+                csv_path = os.path.join(fi_dir, f"xgb_importance_iter_{loop_iter:03d}.csv")
+                imp.reset_index().rename(columns={"index": "feature", 0: "gain"}).to_csv(csv_path, index=False)
+                print(f"[{ts()}] Saved XGB importance CSV: {csv_path}")
+
+                # Plot Top-20 (horizontal bar), highest on top
+                plt.figure(figsize=(9, 7))
+                topk.iloc[::-1].plot(kind="barh")
+                plt.xlabel("Gain")
+                plt.ylabel("Feature")
+                plt.title(f"XGBoost Feature Importance (Top 20) — Iter {loop_iter}")
+                plt.tight_layout()
+                png_path = os.path.join(fi_dir, f"xgb_importance_iter_{loop_iter:03d}.png")
+                plt.savefig(png_path, dpi=150)
+                plt.close()
+                print(f"[{ts()}] Saved XGB importance plot: {png_path}")
+        except Exception as _fi_err:
+            print(f"[{ts()}] WARNING: failed to compute/plot XGB feature importance in iter {loop_iter}: {_fi_err}")
+        # =========================
+        # END ADDED BLOCK
+        # =========================
+
+        # =========================
         # CATBOOST (GBDT)
         # =========================
         print(f"[{ts()}] CatBoost: fitting with early stopping…")
@@ -811,7 +846,7 @@ if __name__ == "__main__":
             ypred = pred_out[model_name].values
             sse = np.sum(np.square((yreal - ypred)))
             r2 = 1 - sse / denom if denom != 0 else np.nan
-            print(f"[{ts()}] {model_name.upper():6s} | SSE={sse:.8f} | R2_zero_bench={r2:.8f}")
+            print(f"[{ts()}] {model_name.UPPER():6s} | SSE={sse:.8f} | R2_zero_bench={r2:.8f}")
 
     t1 = time.perf_counter()
     print(hrule())

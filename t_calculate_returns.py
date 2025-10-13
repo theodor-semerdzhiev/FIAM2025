@@ -360,3 +360,107 @@ print("="*60)
 # Save to CSV
 top_10_shorts.to_csv("top_10_short_holdings.csv", index=False)
 print("\nSaved top 10 short holdings to: top_10_short_holdings.csv")
+
+# ======================================================================
+# APPENDED: Outlier-aware monthly return plots (no changes above)
+# ======================================================================
+try:
+    # shared x-index and labels
+    idx = range(len(monthly_port))
+    step2 = max(1, len(monthly_port) // 20)
+
+    # (A) Split-scale view: Full vs Zoomed/Capped
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+    # Full scale
+    axes[0].bar(idx, monthly_port["port_ls"], alpha=0.7)
+    axes[0].axhline(0, color="black", linewidth=0.5)
+    axes[0].set_title("Monthly L-S Returns (Full Scale)")
+    axes[0].set_ylabel("L-S Return")
+    axes[0].grid(True, alpha=0.3)
+
+    # Zoomed / capped at the 99th percentile of |returns|
+    cap_pct = 99.0
+    y_cap = float(np.nanpercentile(np.abs(monthly_port["port_ls"]), cap_pct))
+    axes[1].bar(idx, monthly_port["port_ls"], alpha=0.7)
+    axes[1].axhline(0, color="black", linewidth=0.5)
+    axes[1].set_ylim(-y_cap, y_cap)
+    axes[1].set_title(f"Monthly L-S Returns (Zoomed, ±{cap_pct:.0f}th percentile cap)")
+    axes[1].set_xlabel("Month")
+    axes[1].set_ylabel("L-S Return")
+    axes[1].grid(True, alpha=0.3)
+
+    # x labels
+    axes[1].set_xticks(range(0, len(monthly_port), step2))
+    axes[1].set_xticklabels(monthly_port["time_label"].iloc[::step2], rotation=45, ha="right")
+
+    # Annotate outliers beyond cap with their actual values
+    tol = 1e-12
+    for i, v in enumerate(monthly_port["port_ls"].values):
+        if abs(v) > y_cap + tol:
+            y_pos = y_cap * 0.95 if v > 0 else -y_cap * 0.95
+            va = "bottom" if v > 0 else "top"
+            axes[1].annotate(f"{v:.2%}", xy=(i, y_pos), xytext=(0, 0),
+                             textcoords="offset points", ha="center", va=va, fontsize=8,
+                             rotation=90)
+
+    plt.tight_layout()
+    plt.savefig("monthly_returns_split_scale.png", dpi=300, bbox_inches="tight")
+    print("Saved plot: monthly_returns_split_scale.png")
+    plt.close()
+
+    # (B) Symmetric log scale (linear near 0, log for tails)
+    fig, ax = plt.subplots(1, 1, figsize=(14, 6))
+    ax.bar(idx, monthly_port["port_ls"], alpha=0.7)
+    ax.axhline(0, color="black", linewidth=0.5)
+    # Choose a reasonable linear threshold (where scale transitions)
+    lin_thresh = max(1e-6, y_cap / 10.0)
+    ax.set_yscale("symlog", linthresh=lin_thresh)
+    ax.set_title("Monthly L-S Returns (Symmetric Log Y-Scale)")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("L-S Return (symlog)")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.set_xticks(range(0, len(monthly_port), step2))
+    ax.set_xticklabels(monthly_port["time_label"].iloc[::step2], rotation=45, ha="right")
+    plt.tight_layout()
+    plt.savefig("monthly_returns_symlog.png", dpi=300, bbox_inches="tight")
+    print("Saved plot: monthly_returns_symlog.png")
+    plt.close()
+
+    # (C) Multi-panel: Full, ±cap, and very tight zoom (e.g., ±median*3)
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+    # Full
+    axes[0].bar(idx, monthly_port["port_ls"], alpha=0.7)
+    axes[0].axhline(0, color="black", linewidth=0.5)
+    axes[0].set_title("L-S Returns (Full)")
+    axes[0].set_ylabel("Return")
+    axes[0].grid(True, alpha=0.3)
+    # ±cap
+    axes[1].bar(idx, monthly_port["port_ls"], alpha=0.7)
+    axes[1].axhline(0, color="black", linewidth=0.5)
+    axes[1].set_ylim(-y_cap, y_cap)
+    axes[1].set_title(f"L-S Returns (±{cap_pct:.0f}th pct cap)")
+    axes[1].set_ylabel("Return")
+    axes[1].grid(True, alpha=0.3)
+    # Tight zoom using robust scale (median absolute deviation)
+    med = float(np.nanmedian(monthly_port["port_ls"]))
+    mad = float(np.nanmedian(np.abs(monthly_port["port_ls"] - med))) + 1e-12
+    tight = 3.0 * mad if mad > 0 else (y_cap / 5.0 if y_cap > 0 else 0.01)
+    axes[2].bar(idx, monthly_port["port_ls"], alpha=0.7)
+    axes[2].axhline(0, color="black", linewidth=0.5)
+    axes[2].set_ylim(med - tight, med + tight)
+    axes[2].set_title("L-S Returns (Tight Zoom via MAD)")
+    axes[2].set_xlabel("Month")
+    axes[2].set_ylabel("Return")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].set_xticks(range(0, len(monthly_port), step2))
+    axes[2].set_xticklabels(monthly_port["time_label"].iloc[::step2], rotation=45, ha="right")
+
+    plt.tight_layout()
+    plt.savefig("monthly_returns_multi_zoom.png", dpi=300, bbox_inches="tight")
+    print("Saved plot: monthly_returns_multi_zoom.png")
+    plt.close()
+
+except Exception as _e:
+    # Keep silent failure from breaking original script behavior
+    print("Outlier-aware plotting skipped due to error:", _e)
