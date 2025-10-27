@@ -4,3 +4,4 @@ ret_sample.csv
 \structured_json_outputs
 *.json
 \embedding_batches
+*.bat

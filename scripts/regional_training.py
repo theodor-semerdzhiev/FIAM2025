@@ -13,145 +13,164 @@ import psutil # For checking system RAM
 
 # --- Configuration ---
 
-# 1. DEFINE THE REGION AND PATHS (MODIFY FOR EACH RUN)
-region_name = "USA" # e.g., "USA", "EUROPE", "ANZ", "ASIA_EAST", etc.
-# !! IMPORTANT: Update this path to where your regional folders are !!
-# Example: base_corpus_dir = r'C:\_Files\School\Competitions\FIAM2025\data\regional_tuning_data'
+# 1. DEFINE THE REGION AND PATHS
+region_name = "USA" # This script is now specifically for the combined USA data
 base_corpus_dir = r'D:\market_data\text_data' # <-- MAKE SURE THIS PATH IS CORRECT
-text_file = os.path.join(base_corpus_dir, region_name, 'corpus.txt') # Path to the specific corpus.txt
+usa_dir = os.path.join(base_corpus_dir, region_name)
+
+# --- MODIFIED: Define paths to BOTH input text files ---
+scraped_text_file = os.path.join(usa_dir, 'corpus_cleaned.txt') # Assumes you ran clean_corpus.py
+filings_text_file = os.path.join(usa_dir, 'usa_filings_corpus.txt') # Output from preprocess_pickles.py
+
+# Create a list of files to load
+data_files_list = []
+if os.path.exists(scraped_text_file):
+    data_files_list.append(scraped_text_file)
+    print(f"Found scraped corpus: {scraped_text_file}")
+else:
+    print(f"WARNING: Scraped corpus not found at {scraped_text_file}, skipping.")
+
+if os.path.exists(filings_text_file):
+    data_files_list.append(filings_text_file)
+    print(f"Found filings corpus: {filings_text_file}")
+else:
+    print(f"WARNING: Filings corpus not found at {filings_text_file}, skipping.")
+
+if not data_files_list:
+    print("ERROR: No input corpus files found. Please run preprocessing scripts.")
+    exit()
+# --- END MODIFICATION ---
+
 
 # 2. CHOOSE BASE MODEL AND OUTPUT DIRECTORY
 base_model_name = 'roberta-base'
-# Directory where the newly trained model will be saved
-# Saved relative to where you run the script
-output_model_dir = f'./{region_name}-fin-roberta' # Creates a folder like ./USA-fin-roberta
+output_model_dir = f'./{region_name}-fin-roberta-largecorpus' # Adjusted name slightly
 
 # 3. TRAINING HYPERPARAMETERS (Optimized for ~12GB VRAM GPU)
-num_train_epochs = 1              # Start with 1 epoch for testing, increase later (e.g., 3-5)
-per_device_train_batch_size = 4   # REDUCED from 8 for 12GB VRAM. Decrease to 2 if you get Out-of-Memory errors.
-gradient_accumulation_steps = 4   # INCREASED from 2 to maintain effective batch size (4*4=16). Increase if you further decrease batch size.
-save_steps = 5000                 # Save a checkpoint every N steps. Lower if training is slow and you want more frequent saves.
-logging_steps = 200               # Log training loss every N steps. Lower for more frequent updates.
-max_seq_length = 256              # Max length for text sequences. 256 is often okay, 512 uses significantly more VRAM.
-learning_rate=5e-5                # Standard learning rate for fine-tuning/domain adaptation.
+num_train_epochs = 1              # Start with 1 epoch, consider more if time allows
+per_device_train_batch_size = 4   # Keep batch size conservative for large dataset
+gradient_accumulation_steps = 4   # Effective batch size = 16
+save_steps = 10000                # Save checkpoints reasonably often on long runs
+logging_steps = 500               # Log loss frequently
+max_seq_length = 256              # Keep at 256 for memory, 512 if possible & needed
+learning_rate=5e-5
 
 # --- Script ---
 
-print(f"--- Starting Continued Pre-training for: {region_name} ---")
+print(f"--- Starting Continued Pre-training for: {region_name} (Combined Corpus) ---")
 print(f"Using base model: {base_model_name}")
-
-if not os.path.exists(text_file):
-    print(f"ERROR: Corpus file not found at {text_file}")
-    print("Please ensure the base_corpus_dir and region_name are set correctly.")
-    exit()
-
-print(f"Loading text data from: {text_file}")
+print(f"Loading text data from: {', '.join(data_files_list)}")
 print(f"Output model will be saved to: {output_model_dir}")
 
 # Check GPU availability
 gpu_available = torch.cuda.is_available()
 if gpu_available:
+    # ...(GPU checks remain the same)...
     print(f"GPU detected: {torch.cuda.get_device_name(0)}")
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GB")
 else:
     print("WARNING: No GPU detected. Training will be very slow on CPU.")
 
-# Ensure output directory exists
+
 os.makedirs(output_model_dir, exist_ok=True)
 
 # 1. Load Tokenizer
+# ...(Tokenizer loading remains the same)...
 print(f"Loading tokenizer: {base_model_name}...")
-# Use RobertaTokenizerFast for speed
 tokenizer = RobertaTokenizerFast.from_pretrained(base_model_name, max_len=max_seq_length)
 print("Tokenizer loaded.")
 
+
 # 2. Load and Prepare Dataset
-print("Loading dataset...")
+print("Loading dataset from multiple files...")
 try:
-    # Load text file line by line
-    dataset = load_dataset('text', data_files={'train': text_file}, split='train')
+    # --- MODIFIED: Load dataset from the list of files ---
+    dataset = load_dataset('text', data_files={'train': data_files_list}, split='train')
+    # --- END MODIFICATION ---
 except Exception as e:
-    print(f"ERROR: Failed to load dataset from {text_file}. Error: {e}")
+    print(f"ERROR: Failed to load dataset from {data_files_list}. Error: {e}")
     exit()
 
-# Basic filtering (optional, but good practice)
+# Filter empty/short lines (important as preprocessing might create some)
 dataset = dataset.filter(lambda example: example['text'] is not None and len(example['text'].strip()) > 10)
 if len(dataset) == 0:
-    print(f"ERROR: No valid lines found in {text_file} after filtering.")
+    print(f"ERROR: No valid lines found in the combined dataset after filtering.")
     exit()
-print(f"Dataset loaded with {len(dataset):,} lines.")
+print(f"Combined dataset loaded with {len(dataset):,} lines.")
 
 
 # Tokenize the dataset
+# ...(Tokenization logic remains the same)...
 def tokenize_function(examples):
-    # Tokenize the texts, truncate sequences longer than max_seq_length
     return tokenizer(examples['text'],
                      truncation=True,
                      max_length=max_seq_length,
-                     padding=False, # Padding handled dynamically by collator
-                     return_special_tokens_mask=False) # Not needed for basic MLM
+                     padding=False,
+                     return_special_tokens_mask=False)
 
 print("Tokenizing dataset (this might take a while)...")
-# Check system RAM before tokenizing
 ram_gb = psutil.virtual_memory().available / (1024**3)
 print(f"Available System RAM: {ram_gb:.2f} GB")
-# Adjust num_proc based on available RAM and cores, be conservative
 num_cpus = os.cpu_count()
-num_proc_tokenizer = max(1, min(num_cpus // 2, int(ram_gb // 4))) # Heuristic: Use half cores, limit based on RAM
+num_proc_tokenizer = max(1, min(num_cpus // 2, int(ram_gb // 4)))
 print(f"Using {num_proc_tokenizer} processes for tokenization.")
 
 tokenized_dataset = dataset.map(
     tokenize_function,
     batched=True,
     num_proc=num_proc_tokenizer,
-    remove_columns=["text"] # Remove original text column
+    remove_columns=["text"]
 )
 print("Tokenization complete.")
 
+
 # 3. Initialize Data Collator
-# This dynamically creates the [MASK] tokens and labels for MLM
+# ...(Data Collator remains the same)...
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer,
     mlm=True,
-    mlm_probability=0.15 # Standard masking probability
+    mlm_probability=0.15
 )
 
+
 # 4. Load Base Model
+# ...(Model loading remains the same)...
 print(f"Loading base model: {base_model_name}...")
-# Make sure to load RobertaForMaskedLM for the MLM task
 model = RobertaForMaskedLM.from_pretrained(base_model_name)
 print("Base model loaded.")
 
+
 # 5. Define Training Arguments
+# ...(Training Arguments remain the same)...
 training_args = TrainingArguments(
     output_dir=output_model_dir,
     overwrite_output_dir=True,
     num_train_epochs=num_train_epochs,
     per_device_train_batch_size=per_device_train_batch_size,
     gradient_accumulation_steps=gradient_accumulation_steps,
-    save_strategy="steps", # Save based on steps
+    save_strategy="steps",
     save_steps=save_steps,
-    save_total_limit=2, # Keep only the latest 2 checkpoints + the final one
-    prediction_loss_only=True, # We only need the loss for pre-training
-    fp16=gpu_available, # Use mixed precision if GPU detected
+    save_total_limit=2,
+    prediction_loss_only=True,
+    fp16=gpu_available,
     logging_steps=logging_steps,
     learning_rate=learning_rate,
-    report_to="none", # Disable wandb/tensorboard reporting unless configured
-    # Add evaluation strategy if you create a small validation split from your corpus
-    # evaluation_strategy="steps",
-    # eval_steps=save_steps,
+    report_to="none",
 )
 
+
 # 6. Initialize Trainer
+# ...(Trainer initialization remains the same)...
 trainer = Trainer(
     model=model,
     args=training_args,
     data_collator=data_collator,
     train_dataset=tokenized_dataset,
-    # Add eval_dataset=tokenized_eval_dataset if using evaluation
 )
 
+
 # 7. Start Training
+# ...(Training execution remains the same)...
 print("--- Starting MLM Training ---")
 print(f"Effective batch size: {per_device_train_batch_size * gradient_accumulation_steps * (torch.cuda.device_count() if gpu_available else 1)}")
 print(f"Epochs: {num_train_epochs}, Max Seq Length: {max_seq_length}")
@@ -159,7 +178,9 @@ print(f"Using mixed precision (FP16): {gpu_available}")
 trainer.train()
 print("--- MLM Training Complete ---")
 
+
 # 8. Save the Final Model and Tokenizer
+# ...(Saving remains the same)...
 print(f"Saving final adapted model to {output_model_dir}...")
 trainer.save_model(output_model_dir)
 tokenizer.save_pretrained(output_model_dir)
