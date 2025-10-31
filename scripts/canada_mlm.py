@@ -15,52 +15,48 @@ from multiprocess import freeze_support # Use the 'multiprocess' fork
 # --- Configuration ---
 
 # 1. DEFINE THE REGION AND PATHS
-region_name = "USA"
-base_corpus_dir = r'D:\market_data\text_data' # <-- MAKE SURE THIS PATH IS CORRECT
-usa_dir = os.path.join(base_corpus_dir, region_name)
-scraped_text_file = os.path.join(usa_dir, 'corpus_cleaned.txt')
-filings_text_file = os.path.join(usa_dir, 'usa_filings_corpus.txt')
+REGION_NAME = "CANADA"
 
+# --- !! IMPORTANT: SET THIS PATH !! ---
+# Set the full path to your new Canada corpus text file
+CORPUS_FILE_PATH = r'D:\market_data\text_data\REGIONS\CANADA_corpus.txt' # <-- SET THIS
+
+# --- !! NEW: Set your main checkpoints directory !! ---
+CHECKPOINT_BASE_DIR = r'D:\market_data\text_data\CHECKPOINTS'
+
+# --- Check if corpus file exists ---
 data_files_list = []
-if os.path.exists(scraped_text_file):
-    data_files_list.append(scraped_text_file)
-    print(f"Found scraped corpus: {scraped_text_file}")
+if os.path.exists(CORPUS_FILE_PATH):
+    data_files_list.append(CORPUS_FILE_PATH)
+    print(f"Found {REGION_NAME} corpus: {CORPUS_FILE_PATH}")
 else:
-    print(f"WARNING: Scraped corpus not found at {scraped_text_file}, skipping.")
-
-if os.path.exists(filings_text_file):
-    data_files_list.append(filings_text_file)
-    print(f"Found filings corpus: {filings_text_file}")
-else:
-    print(f"WARNING: Filings corpus not found at {filings_text_file}, skipping.")
-
-if not data_files_list:
-    print("ERROR: No input corpus files found. Please run preprocessing scripts.")
+    print(f"ERROR: {REGION_NAME} corpus not found at {CORPUS_FILE_PATH}")
+    print("Please run the '2_build_regional_corpus.py' script first and set the path.")
     exit()
+# --- END MODIFICATION ---
 
 
 # 2. CHOOSE BASE MODEL AND OUTPUT DIRECTORY
 base_model_name = 'roberta-base'
-output_model_dir = f'./{region_name}-fin-roberta-largecorpus'
+# --- MODIFIED: New output model name and location ---
+output_model_dir = os.path.join(CHECKPOINT_BASE_DIR, f'{REGION_NAME}-fin-roberta')
 
 # 3. TRAINING HYPERPARAMETERS
-num_train_epochs = 1
-per_device_train_batch_size = 36
-gradient_accumulation_steps = 1
-save_steps = 10000
-logging_steps = 500
+# --- MODIFIED: Increased epochs since dataset is much smaller ---
+num_train_epochs = 5 # 500MB is small, let's train for 10 full passes
+per_device_train_batch_size = 32 # Keep this as high as your VRAM allows
+gradient_accumulation_steps = 1  # Keep this at 1 for max speed
+save_steps = 5000 # Save a checkpoint every 2,000 steps (more frequent for small dataset)
+logging_steps = 200 # Log more frequently
 max_seq_length = 256
 learning_rate=5e-5
 
 # --- Tokenization ---
-# Load the tokenizer *once* in the global scope.
-# This makes it a read-only object that child processes can safely import.
 print(f"Loading tokenizer: {base_model_name}...")
 tokenizer = RobertaTokenizerFast.from_pretrained(base_model_name, max_len=max_seq_length)
 print("Tokenizer loaded.")
 
 def tokenize_function(examples):
-    # This function now safely uses the globally-loaded tokenizer
     return tokenizer(examples['text'],
                      truncation=True,
                      max_length=max_seq_length,
@@ -69,7 +65,7 @@ def tokenize_function(examples):
 
 # --- Main Execution Block ---
 def main():
-    print(f"--- Starting Continued Pre-training for: {region_name} (Combined Corpus) ---")
+    print(f"--- Starting Continued Pre-training for: {REGION_NAME} ---")
     print(f"Using base model: {base_model_name}")
     print(f"Loading text data from: {', '.join(data_files_list)}")
     print(f"Output model will be saved to: {output_model_dir}")
@@ -84,7 +80,7 @@ def main():
     os.makedirs(output_model_dir, exist_ok=True)
 
     # 1. Load and Prepare Dataset
-    print("Loading dataset from multiple files...")
+    print("Loading dataset...")
     try:
         dataset = load_dataset('text', data_files={'train': data_files_list}, split='train')
     except Exception as e:
@@ -92,17 +88,15 @@ def main():
         exit()
 
     print("Filtering dataset...")
-    # --- MODIFIED: Force num_proc=1 for filter to avoid PermissionError ---
     filtered_dataset = dataset.filter(
         lambda example: example['text'] is not None and len(example['text'].strip()) > 10,
-        num_proc=1 # Disable multiprocessing for filter step
+        num_proc=1 # num_proc=1 is fine for the filter step
     )
-    # --- END MODIFICATION ---
 
     if len(filtered_dataset) == 0:
-        print(f"ERROR: No valid lines found in the combined dataset after filtering.")
+        print(f"ERROR: No valid lines found in the dataset after filtering.")
         exit()
-    print(f"Combined dataset loaded and filtered with {len(filtered_dataset):,} lines.")
+    print(f"Dataset loaded and filtered with {len(filtered_dataset):,} lines.")
 
     # Tokenize the dataset
     print("Tokenizing dataset (this might take a while)...")
@@ -110,15 +104,13 @@ def main():
     print(f"Available System RAM: {ram_gb:.2f} GB")
     num_cpus = os.cpu_count()
     
-    # Keep num_proc=1 if RAM is low, otherwise allow multiprocessing
-    # Your 1.75 GB of RAM will force this to 1
-    num_proc_tokenizer = 1 if ram_gb < 8 else max(1, min(num_cpus // 2, int(ram_gb // 4)))
+    # Use more processes if you have RAM, but 1-2 is fine on your low-RAM system
+    num_proc_tokenizer = 1 if ram_gb < 8 else max(1, min(num_cpus // 2, 4))
     print(f"Using {num_proc_tokenizer} processes for tokenization.")
 
-    # --- THIS IS THE STEP THAT WILL LIKELY FAIL NEXT ---
     try:
         tokenized_dataset = filtered_dataset.map(
-            tokenize_function, # Uses the global tokenizer
+            tokenize_function,
             batched=True,
             num_proc=num_proc_tokenizer,
             remove_columns=["text"]
@@ -126,8 +118,7 @@ def main():
     except Exception as e:
         print(f"\n--- FAILED DURING .map() ---")
         print(f"ERROR: {e}")
-        print("This is the expected 'RAM Wall'. Your system has {ram_gb:.2f} GB of RAM, which is not enough for this 34GB+ dataset.")
-        print("Please move this script to a high-RAM environment like Google Colab Pro.")
+        print(f"This might be a RAM issue. Your system has {ram_gb:.2f} GB of RAM.")
         exit()
         
     print("Tokenization complete.")
@@ -153,10 +144,9 @@ def main():
         gradient_accumulation_steps=gradient_accumulation_steps,
         save_strategy="steps",
         save_steps=save_steps,
-        save_total_limit=2,
+        save_total_limit=2, # Keeps the 2 most recent checkpoints
         prediction_loss_only=True,
-        fp16=gpu_available,
-        gradient_checkpointing=True,
+        fp16=gpu_available, # Use mixed precision if GPU is available
         logging_steps=logging_steps,
         learning_rate=learning_rate,
         report_to="none",
@@ -176,6 +166,8 @@ def main():
     print(f"Epochs: {num_train_epochs}, Max Seq Length: {max_seq_length}")
     print(f"Using mixed precision (FP16): {gpu_available}")
 
+    # Use resume_from_checkpoint=True if you want to resume a stopped job
+    # trainer.train(resume_from_checkpoint=True)
     trainer.train()
     print("--- MLM Training Complete ---")
 
@@ -186,7 +178,6 @@ def main():
     print(f"Model and tokenizer saved successfully in {output_model_dir}")
 
 
-# This guard is CRITICAL for multiprocessing
 if __name__ == "__main__":
     freeze_support() # Call this first
     main()           # Then call main()

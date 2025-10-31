@@ -18,3 +18,34 @@ Team Reverse Algo
 - https://huggingface.co/datasets/vblagoje/cc_news
 - Various rss feeds see script
 - 10k's and q's provided for the hack. 
+
+### Unique Countries
+
+--- Unique Country List ---
+- Australia
+- Austria
+- Belgium
+- Canada
+- China
+- Denmark
+- Finland
+- France
+- Germany
+- Hong Kong
+- Ireland
+- Israel
+- Italy
+- Japan
+- Luxembourg
+- Mexico
+- Netherlands
+- Norway
+- Portugal
+- Singapore
+- South Korea
+- Spain
+- Sweden
+- Switzerland
+- Taiwan
+- United Kingdom
+----------------------------
