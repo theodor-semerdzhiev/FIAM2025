@@ -15,10 +15,10 @@ from multiprocess import freeze_support # Use the 'multiprocess' fork
 # --- Configuration ---
 
 # 1. DEFINE THE REGION AND PATHS
-REGION_NAME = "ANGLOSPHERE_COMMONLAW"
+REGION_NAME = "GERMANIC_MAINLAND"
 
 
-CORPUS_FILE_PATH = r'D:\market_data\text_data\REGIONS\ANGLOSPHERE_COMMONLAW_corpus.txt' # <-- SET THIS
+CORPUS_FILE_PATH = r'D:\market_data\text_data\REGIONS\GERMANIC_MAINLAND_corpus.txt' # <-- SET THIS
 
 CHECKPOINT_BASE_DIR = r'D:\market_data\text_data\CHECKPOINTS'
 
@@ -40,7 +40,7 @@ output_model_dir = os.path.join(CHECKPOINT_BASE_DIR, f'{REGION_NAME}-fin-roberta
 
 # 3. TRAINING HYPERPARAMETERS
 # --- MODIFIED: Increased epochs since dataset is much smaller ---
-num_train_epochs = 5 # 4gb is med, let's train for 2 full passes
+num_train_epochs = 6 # 4gb is med, let's train for 2 full passes
 per_device_train_batch_size = 32 # Keep this as high as your VRAM allows
 gradient_accumulation_steps = 1  # Keep this at 1 for max speed
 save_steps = 2000 # Save a checkpoint every 2,000 steps (more frequent for small dataset)
