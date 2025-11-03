@@ -536,7 +536,7 @@ if __name__ == "__main__":
 
         loop_iter += 1
         # ✅ Skip until the 7th iteration OR after a certain year
-        if loop_iter < 11:
+        if loop_iter < 3: #change this to 3 to start at 2017
             counter += 1
             continue
 
@@ -818,7 +818,7 @@ if __name__ == "__main__":
     pred_out = pd.concat(pred_frames, ignore_index=True) if pred_frames else pd.DataFrame()
 
     # --- write CSV ---
-    out_path = os.path.join(work_dir, "output.csv")
+    out_path = os.path.join(work_dir, "output1.csv")
     print(hrule())
     print(f"[{ts()}] Writing predictions to: {out_path}")
     if pred_out.empty:
