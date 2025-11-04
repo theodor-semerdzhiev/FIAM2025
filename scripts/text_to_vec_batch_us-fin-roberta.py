@@ -13,21 +13,26 @@ tqdm.pandas()
 
 # --- Configuration ---
 
-# --- !! 1. BATCHING CONFIGURATION !! ---
-PANDAS_BATCH_SIZE = 5000 # How many ROWS to process before saving a file
-GPU_BATCH_SIZE = 360      # How many CHUNKS to feed to the GPU at once.
-                         # Increase this to max out your VRAM (e.g., 128, 256)
+# --- !! 1. SET YOUR MODEL PATH !! ---
+# Point this to the checkpoint folder of the model you want to use
+# e.g., r'D:\market_data\text_data\CHECKPOINTS\CANADA-fin-roberta\checkpoint-4000'
+MODEL_PATH = r'D:\market_data\text_data\CHECKPOINTS\USA-fin-roberta-filings-2016\checkpoint-3020000'
 
-# --- !! 2. CHUNK SIZE (in words) !! ---
-# We split the text into chunks of this size. 400 words is safely under the 512 token limit.
-CHUNK_SIZE_IN_WORDS = 400
-
-# --- !! 3. PATHS !! ---
+# --- !! 2. SET YOUR DATA AND OUTPUT PATHS !! ---
 DATA_DIR = r'C:\_Files\School\Competitions\FIAM2025\data'
 TEXT_DATA_PATH = os.path.join(DATA_DIR, 'us_text_data_yr')
 
 # Set a new output directory to avoid overwriting your truncated embeddings
-BATCH_DIR = 'embedding_batches_finbert_ADVANCED_BATCHED'
+BATCH_DIR = 'embedding_batches_us-fin-roberta_ADVANCED_BATCHED' # Added _BATCHED
+
+# --- !! 3. BATCHING CONFIGURATION !! ---
+PANDAS_BATCH_SIZE = 2000 # How many ROWS to process before saving a file
+GPU_BATCH_SIZE = 256      # How many CHUNKS to feed to the GPU at once.
+                         # Increase this to max out your VRAM (e.g., 128, 256)
+
+# --- !! 4. CHUNK SIZE (in words) !! ---
+# We split the text into chunks of this size. 400 words is safely under the 512 token limit.
+CHUNK_SIZE_IN_WORDS = 400
 
 # --- End Configuration ---
 
@@ -58,20 +63,32 @@ def load_all_text_data(data_directory):
         
     return pd.concat(df_list, ignore_index=True)
 
-# --- (get_text_embedding function is removed as logic is now in the main loop) ---
+
+# --- !! THIS FUNCTION IS NO LONGER USED !! ---
+# def get_pooled_embedding(full_text, model, tokenizer, chunk_size, device):
+#     ... (Removed for brevity, we now do this in the main loop) ...
+# --- !! END MODIFIED FUNCTION !! ---
+
 
 if __name__ == "__main__":
     
+    if MODEL_PATH == r'PLEASE_SET_YOUR_LATEST_CHECKPOINT_PATH':
+        print(f"ERROR: Please open '{__file__}' and set the 'MODEL_PATH' variable at the top.")
+        exit()
+
     print("\n--- Loading Text Data ---")
     df_text = load_all_text_data(TEXT_DATA_PATH)
     if df_text.empty: exit()
     
+    # Filter for valid 'Risk Factors' text
     df_text_valid = df_text[df_text['rf'].notna() & (df_text['rf'].str.len() > 100)].copy()
     print(f"Found {len(df_text_valid)} filings with valid 'Risk Factors' text to process.")
 
-    print("\n--- Initializing FinBERT Model ---")
-    tokenizer = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-    model = AutoModel.from_pretrained("ProsusAI/finbert")
+    print("\n--- Initializing Custom Model ---")
+    print(f"Loading model from: {MODEL_PATH}")
+    
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+    model = AutoModel.from_pretrained(MODEL_PATH)
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if torch.cuda.is_available():
@@ -108,6 +125,7 @@ if __name__ == "__main__":
         # 2. Create one giant list of all chunks
         all_chunks = []
         # Keep track of which chunks belong to which filing
+        # e.g., [(0, 10), (10, 25), (25, 26), ...]
         filing_to_chunk_indices = []
         
         print(" 1. Chunking texts...")
@@ -143,7 +161,6 @@ if __name__ == "__main__":
                 
                 # Get the [CLS] token embedding for *all items in the batch*
                 # Shape: [GPU_BATCH_SIZE, 768]
-                # For BERT models (like FinBERT), the [CLS] token is at index 0
                 cls_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
                 
                 all_chunk_embeddings.extend(cls_embeddings)
@@ -164,6 +181,7 @@ if __name__ == "__main__":
             
             final_pooled_embeddings.append(pooled_embedding)
         
+        # --- !! END NEW BATCHING LOGIC !! ---
         
         # Convert list of embeddings into a new DataFrame
         embedding_df = pd.DataFrame(final_pooled_embeddings, index=batch_df.index)
@@ -178,3 +196,4 @@ if __name__ == "__main__":
 
     print("\n--- All batches processed successfully! ---")
     print(f"The output is a folder named '{BATCH_DIR}' containing all the processed embedding files.")
+

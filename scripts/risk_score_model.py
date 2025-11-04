@@ -13,7 +13,7 @@ if __name__ == "__main__":
     data_dir = r'C:\_Files\Personal\Projects\FIAM\FIAM2025\data'
     ret_sample_path = os.path.join(data_dir, 'ret_sample.csv')
     cik_link_path = os.path.join(data_dir, 'cik_gvkey_linktable_USA_only.csv')
-    embeddings_batch_dir = 'embedding_batches'
+    embeddings_batch_dir = 'embedding_batches_us-fin-roberta' # Set to custom embeddings
 
     # Load All Pre-processed Data 
     print("--- Loading Quantitative Data ---")
@@ -65,11 +65,11 @@ if __name__ == "__main__":
     counter = 0
     pred_out = pd.DataFrame()
 
-    while (starting + pd.DateOffset(years=11 + counter)) <= pd.to_datetime("20260101", format="%Y%m%d"):
+    while (starting + pd.DateOffset(years=13 + counter)) <= pd.to_datetime("20260101", format="%Y%m%d"):
         cutoff_start_train = starting
-        cutoff_end_train = starting + pd.DateOffset(years=8 + counter)
-        cutoff_end_validate = starting + pd.DateOffset(years=10 + counter)
-        cutoff_end_test = starting + pd.DateOffset(years=11 + counter)
+        cutoff_end_train = starting + pd.DateOffset(years=10 + counter)
+        cutoff_end_validate = starting + pd.DateOffset(years=12 + counter)
+        cutoff_end_test = starting + pd.DateOffset(years=13 + counter)
         
         print(f"\nProcessing window: Training until {cutoff_end_train.year}, Testing year {cutoff_end_test.year-1}")
 
