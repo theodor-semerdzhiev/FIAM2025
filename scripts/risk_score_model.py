@@ -10,10 +10,11 @@ import glob
 
 
 if __name__ == "__main__":
-    data_dir = r'C:\_Files\Personal\Projects\FIAM\FIAM2025\data'
-    ret_sample_path = os.path.join(data_dir, 'ret_sample.csv')
-    cik_link_path = os.path.join(data_dir, 'cik_gvkey_linktable_USA_only.csv')
-    embeddings_batch_dir = 'embedding_batches_us-fin-roberta' # Set to custom embeddings
+    quant_data_dir = r'C:\_Files\School\Competitions\FIAM2025\data\quant_data'
+    mapping_data_dir = r'C:\_Files\School\Competitions\FIAM2025\data\mapping'
+    ret_sample_path = os.path.join(quant_data_dir, 'ret_sample.csv')
+    cik_link_path = os.path.join(mapping_data_dir, 'cik_gvkey_linktable_USA_only.csv')
+    embeddings_batch_dir = r'C:\_Files\School\Competitions\FIAM2025\embeddings\embedding_batches_us-fin-roberta_ADVANCED_BATCHED' # Currently set to use finBERT embeds
 
     # Load All Pre-processed Data 
     print("--- Loading Quantitative Data ---")

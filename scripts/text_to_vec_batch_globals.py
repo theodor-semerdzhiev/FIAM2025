@@ -14,20 +14,21 @@ tqdm.pandas()
 # --- Configuration ---
 
 # --- !! 1. SET YOUR MODEL PATH !! ---
-MODEL_PATH = r'D:\market_data\text_data\CHECKPOINTS\USA-fin-roberta-filings-2016\checkpoint-3020000'
+MODEL_PATH = r'D:\market_data\text_data\CHECKPOINTS\ASIA_PACIFIC-fin-roberta\checkpoint-9600'
 
 # --- !! 2. SET THE COUNTRIES FOR THIS MODEL !! ---
-COUNTRIES_TO_PROCESS = ['United States'] # <-- SET THIS!
+COUNTRIES_TO_PROCESS = ['China', 'Hong Kong', 'Japan', 'Singapore', 'South Korea', 'Taiwan'] # <-- SET THIS!
+# COUNTRIES_TO_PROCESS = ['Canada']
 
 # --- !! 3. SET YOUR DATA AND OUTPUT PATHS !! ---
-TEXT_DATA_PATH = r'C:\_Files\Personal\Projects\FIAM\FIAM2025\data\all_pickle_data_combined' # <-- SET THIS!
+TEXT_DATA_PATH = r'C:\_Files\School\Competitions\FIAM2025\data\global_text_data' 
 
 # --- !! 4. SET THE TEXT COLUMN TO EMBED !! ---
 TEXT_COLUMN_NAME = 'section_7_risk_factors' 
 
 # --- !! 5. BATCHING CONFIGURATION !! ---
 PANDAS_BATCH_SIZE = 5000 # How many ROWS to process before saving a file
-GPU_BATCH_SIZE = 64      # How many CHUNKS to feed to the GPU at once.
+GPU_BATCH_SIZE = 360      # How many CHUNKS to feed to the GPU at once.
                          # Increase this to max out your VRAM (e.g., 128, 256)
 
 # --- !! 6. CHUNK SIZE (in words) !! ---
@@ -40,10 +41,11 @@ BATCH_DIR = f"embedding_batches_{'_'.join(COUNTRIES_TO_PROCESS).lower()}_ADVANCE
 # --- End Configuration ---
 
 
-def load_all_text_data(data_directory, countries_to_load, required_text_col):
+def load_all_text_data_filtered(data_directory, countries_list):
     """
-    Loads all pickle files from a directory, filters them in memory for
-    the specified countries, and combines them into a single pandas DataFrame.
+    Loads all pickle files, *immediately* filters them for the specified countries,
+    and combines only those rows into a single pandas DataFrame.
+    This is much more memory-efficient than loading everything first.
     """
     all_pickle_files = sorted(glob.glob(os.path.join(data_directory, '**', '*.pkl'), recursive=True))
     
@@ -52,56 +54,60 @@ def load_all_text_data(data_directory, countries_to_load, required_text_col):
         return pd.DataFrame()
 
     df_list = []
-    print(f"Found {len(all_pickle_files)} pickle files. Scanning for countries: {', '.join(countries_to_load)}")
-    
-    total_rows_found = 0
-    
+    print(f"Found {len(all_pickle_files)} pickle files. Loading and filtering...")
     for i, file_path in enumerate(all_pickle_files):
         try:
             df = pd.read_pickle(file_path)
             
-            if 'country' not in df.columns or required_text_col not in df.columns:
-                print(f"  > Skipping {os.path.basename(file_path)} (missing 'country' or '{required_text_col}' column)")
+            # Check if required 'country' column exists
+            if 'country' not in df.columns:
+                print(f"  > Skipping {os.path.basename(file_path)} (missing 'country' column)")
                 continue
-
-            filtered_df = df[df['country'].isin(countries_to_load)]
+                
+            # Filter for the specified countries
+            filtered_df = df[df['country'].isin(countries_list)]
             
             if not filtered_df.empty:
-                print(f"  > Found {len(filtered_df)} matching rows in {os.path.basename(file_path)} ({i+1}/{len(all_pickle_files)})")
                 df_list.append(filtered_df)
-                total_rows_found += len(filtered_df)
-            
+                
         except Exception as e:
             print(f"    > Error loading or filtering {os.path.basename(file_path)}: {e}")
             
     if not df_list:
-        print("No matching data found in any file.")
+        print(f"No data found for countries: {', '.join(countries_list)}")
         return pd.DataFrame()
         
-    print(f"\n--- Load complete. Found a total of {total_rows_found:,} matching rows. ---")
+    print(f"Successfully loaded {len(df_list)} filtered DataFrames.")
     return pd.concat(df_list, ignore_index=True)
 
-# --- (get_pooled_embedding function is removed as logic is now in the main loop) ---
 
 if __name__ == "__main__":
     
     if MODEL_PATH == r'PLEASE_SET_YOUR_LATEST_CHECKPOINT_PATH':
         print(f"ERROR: Please open '{__file__}' and set the 'MODEL_PATH' variable at the top.")
         exit()
-    if TEXT_DATA_PATH == r'C:\_Files\Personal\Projects\FIAM\FIAM2025\data\all_pickle_data_combined':
+    if TEXT_DATA_PATH == r'C:\_Files\School\Competitions\FIAM2025\data\international_text_data':
         print(f"ERROR: Please open '{__file__}' and set the 'TEXT_DATA_PATH' variable at the top.")
         exit()
     if not COUNTRIES_TO_PROCESS:
         print(f"ERROR: Please open '{__file__}' and set the 'COUNTRIES_TO_PROCESS' list at the top.")
         exit()
 
-    # --- Load Data ---
-    print("\n--- Loading Text Data ---")
-    df_text = load_all_text_data(TEXT_DATA_PATH, COUNTRIES_TO_PROCESS, TEXT_COLUMN_NAME)
+
+    print("\n--- Loading And Filtering Text Data ---")
+    df_text = load_all_text_data_filtered(TEXT_DATA_PATH, COUNTRIES_TO_PROCESS)
     if df_text.empty: exit()
     
+    # --- !! NEW FILTERING LOGIC !! ---
     print(f"Total rows for {', '.join(COUNTRIES_TO_PROCESS)}: {len(df_text)}")
     
+    # 1. Check if TEXT_COLUMN_NAME exists
+    if TEXT_COLUMN_NAME not in df_text.columns:
+        print(f"CRITICAL ERROR: The '{TEXT_COLUMN_NAME}' column was not found in your DataFrame.")
+        print("Please check the 'TEXT_COLUMN_NAME' variable. Aborting.")
+        exit()
+        
+    # 2. Filter for valid text
     df_text_valid = df_text[
         df_text[TEXT_COLUMN_NAME].notna() & (df_text[TEXT_COLUMN_NAME].str.len() > 100)
     ].copy()
@@ -109,10 +115,11 @@ if __name__ == "__main__":
     print(f"Found {len(df_text_valid)} filings with valid '{TEXT_COLUMN_NAME}' text to process.")
     
     if df_text_valid.empty:
-        print(f"No valid '{TEXT_COLUMN_NAME}' text found for these countries. Aborting.")
+        print("No valid text found for these countries. Aborting.")
         exit()
+    # --- !! END NEW FILTERING LOGIC !! ---
 
-    # --- Load Model ---
+
     print("\n--- Initializing Custom Model ---")
     print(f"Loading model from: {MODEL_PATH}")
     
@@ -123,11 +130,10 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         print(f"GPU is available: {torch.cuda.get_device_name(0)}")
         model.to(device)
-        model.eval() # Set model to evaluation mode (disables dropout, etc.)
+        model.eval() # Set model to evaluation mode
     else:
         print("WARNING: GPU not found. Processing will be on CPU (slow).")
 
-    # --- Process Batches ---
     print(f"\n--- Generating {len(df_text_valid)} POOLED Embeddings ---")
     print(f"Processing in pandas chunks of {PANDAS_BATCH_SIZE}")
     print(f"Processing in GPU batches of {GPU_BATCH_SIZE}")
@@ -179,17 +185,13 @@ if __name__ == "__main__":
         all_chunk_embeddings = []
         with torch.no_grad():
             for k in tqdm(range(0, len(all_chunks), GPU_BATCH_SIZE), desc="GPU Batches"):
-                # Grab a batch of chunk strings
                 chunk_batch = all_chunks[k : k + GPU_BATCH_SIZE]
                 
-                # Tokenize the whole batch at once
                 inputs = tokenizer(chunk_batch, return_tensors='pt', truncation=True, padding=True, max_length=512).to(device)
                 
-                # Get embeddings for the whole batch
                 outputs = model(**inputs)
                 
                 # Get the [CLS] token embedding for *all items in the batch*
-                # Shape: [GPU_BATCH_SIZE, 768]
                 cls_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
                 
                 all_chunk_embeddings.extend(cls_embeddings)
@@ -212,18 +214,39 @@ if __name__ == "__main__":
         
         # --- !! END NEW BATCHING LOGIC !! ---
         
-        # Convert list of embeddings into a new DataFrame
         embedding_df = pd.DataFrame(final_pooled_embeddings, index=batch_df.index)
-        embedding_df.columns = [f'{TEXT_COLUMN_NAME}_embedding_{j}' for j in range(embedding_df.shape[1])]
+        embedding_df.columns = [f'rf_embedding_{j}' for j in range(embedding_df.shape[1])]
         
-        columns_to_keep = ['country']
+        # Keep the columns you identified as necessary for the merge
+        columns_to_keep = ['company_name', 'period_end_date', 'country']
+        
+        # Check if all required columns exist in this batch
+        missing_cols = [col for col in columns_to_keep if col not in batch_df.columns]
+        if missing_cols:
+            print(f"WARNING: Batch is missing required metadata columns: {missing_cols}")
+            # Keep whatever columns *are* available from your list
+            columns_to_keep = [col for col in columns_to_keep if col in batch_df.columns]
+
+        # Only select the columns that are confirmed to exist
+        if columns_to_keep:
+            batch_info_df = batch_df[columns_to_keep].copy()
             
-        batch_info_df = batch_df[columns_to_keep]
-        batch_result_df = pd.concat([batch_info_df, embedding_df], axis=1)
+            # --- Date Normalization ---
+            # Ensure period_end_date is a proper datetime object for future merging
+            if 'period_end_date' in batch_info_df.columns:
+                batch_info_df['period_end_date'] = pd.to_datetime(batch_info_df['period_end_date'], errors='coerce')
+            # --- End Date Normalization ---
+
+            batch_result_df = pd.concat([batch_info_df, embedding_df], axis=1)
+        else:
+            print("WARNING: No metadata columns found. Saving only embeddings.")
+            batch_result_df = embedding_df
+        # --- !! END MODIFICATION !! ---
         
         batch_result_df.to_pickle(batch_file_path)
         print(f"Pandas Batch {i+1} saved to {batch_file_path}")
 
     print("\n--- All batches processed successfully! ---")
     print(f"The output is a folder named '{BATCH_DIR}' containing all the processed embedding files.")
+
 
