@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 # ------------------------------
 # Config
 # ------------------------------
-PRED_PATH = "output.csv"
+PRED_PATH = "output_final.csv"
 MODEL_COL = "blend"            # prediction column to use
 TOP_EACH_CAP = 125             # max names on each side
 MIN_TOTAL = 100                # min total names (will try to split ≈50/50)
