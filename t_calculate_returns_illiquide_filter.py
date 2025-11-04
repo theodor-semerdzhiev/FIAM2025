@@ -27,9 +27,15 @@ FEATURES_PATH = "data/ret_sample.parquet"   # original features universe (for li
 MKT_PATH      = "data/mkt_ind.csv"          # market data (rf, ret) monthly
 
 MODEL_COL     = "blend"               # prediction column to use
-TOP_EACH_CAP  = 125                   # max names on each side
-MIN_TOTAL     = 100                   # min total names (≈50/50 if possible)
 PERCENTILE    = 1                     # top/bottom PERCENTILE% as initial threshold
+
+# New explicit name-count limits (per side and total)
+MIN_TOTAL     = 100                   # min total names (try to reach if availability allows)
+MAX_TOTAL     = 250                   # max total names across long+short
+MIN_LONG      = 70                    # min long names (subject to availability)
+MIN_SHORT     = 30                    # min short names (subject to availability)
+MAX_LONG      = 175                   # max long names
+MAX_SHORT     = 75                    # max short names
 
 # ==============================
 # STRICT Liquidity rules (time-t)
@@ -387,7 +393,6 @@ predX["is_illiquid"] = predX.apply(is_illiquid_row, axis=1)
 # ------------------------------
 def select_portfolios_one_month(df_month: pd.DataFrame,
                                 model_col: str,
-                                top_each_cap: int,
                                 min_total: int,
                                 percentile: float,
                                 prev_long_ids=None,
@@ -425,24 +430,56 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
     longs_init  = ranked(longs_init_candidates, "long")
     shorts_init = ranked(shorts_init_candidates, "short")
 
-    # --- explicit 70% long / 30% short name targets ---
+    # Availability from percentile pools
     avail_L = len(longs_init)
     avail_S = len(shorts_init)
-    cap_L = min(top_each_cap, avail_L)
-    cap_S = min(top_each_cap, avail_S)
 
-    def max_total_allowed(cL, cS):
-        m1 = int(math.floor(cL / 0.70)) if cL > 0 else 0
-        m2 = int(math.floor(cS / 0.30)) if cS > 0 else 0
-        return min(m1, m2)
+    # Initial targets: respect side caps and availability
+    k_long_target  = min(MAX_LONG, avail_L)
+    k_short_target = min(MAX_SHORT, avail_S)
 
-    max_total = min(n, cap_L + cap_S, max_total_allowed(cap_L, cap_S))
-    total_target = min(max_total, max(min_total, 0))
-    if total_target <= 0:
-        return df_month.iloc[0:0], df_month.iloc[0:0]
+    # Enforce side minimums when availability allows
+    if avail_L >= MIN_LONG:
+        k_long_target = max(k_long_target, MIN_LONG)
+    if avail_S >= MIN_SHORT:
+        k_short_target = max(k_short_target, MIN_SHORT)
 
-    k_long_target  = int(round(0.70 * total_target))
-    k_short_target = total_target - k_long_target
+    # Try to achieve overall minimum total if possible by adding within caps
+    total_target = k_long_target + k_short_target
+    if total_target < min_total:
+        need = min_total - total_target
+
+        # Room to grow on each side within caps and availability
+        room_L = max(0, min(MAX_LONG, avail_L) - k_long_target)
+        room_S = max(0, min(MAX_SHORT, avail_S) - k_short_target)
+
+        # Fill preferring 70/30 split while adding
+        while need > 0 and (room_L > 0 or room_S > 0):
+            # Desired proportions 0.70 / 0.30
+            frac_L = (k_long_target + k_short_target) and (k_long_target / (k_long_target + k_short_target)) or 0.0
+            if frac_L < 0.70 and room_L > 0:
+                k_long_target += 1; room_L -= 1; need -= 1; continue
+            if room_S > 0:
+                k_short_target += 1; room_S -= 1; need -= 1; continue
+            if room_L > 0:
+                k_long_target += 1; room_L -= 1; need -= 1; continue
+            break
+
+    # Never exceed total cap (should naturally fit since 175+75=250)
+    if k_long_target + k_short_target > MAX_TOTAL:
+        # reduce excess biased toward maintaining 70/30; don't violate side minimums
+        excess = k_long_target + k_short_target - MAX_TOTAL
+        while excess > 0:
+            # remove from the side furthest above its proportion (or with more headroom above min)
+            propL = k_long_target / (k_long_target + k_short_target)
+            if propL > 0.70 and k_long_target > max(MIN_LONG, 0):
+                k_long_target -= 1
+            elif k_short_target > max(MIN_SHORT, 0):
+                k_short_target -= 1
+            else:
+                # if we can't reduce without breaking mins, break
+                break
+            excess -= 1
 
     # Helper: country-aware picker with turnover preference
     def pick_with_constraints(ranked_df, k_target, side, prev_ids, turnover_cap, max_ctry_wt, min_ctrys):
@@ -451,13 +488,13 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
             rd["excntry"] = "UNK"
         rd["excntry"] = rd["excntry"].astype(str).fillna("UNK")
 
-        allowed_changes = int(math.floor(turnover_cap * k_target))
+        allowed_changes = int(math.floor(turnover_cap * max(k_target, 1)))
         min_keep = max(0, k_target - allowed_changes)
 
         rd_prev = rd[rd["id"].isin(prev_ids)].copy()
         rd_new  = rd[~rd["id"].isin(prev_ids)].copy()
 
-        max_count = max(1, int(math.floor(max_ctry_wt * k_target)))
+        max_count = max(1, int(math.floor(max_ctry_wt * max(k_target, 1))))
 
         selected_rows = []
         ctry_counts = {}
@@ -568,19 +605,7 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
     longs_sel  = pick_with_constraints(longs_init,  k_long_target,  "long",  prev_long_ids,  TURNOVER_MAX_LONG,  MAX_COUNTRY_WEIGHT, MIN_COUNTRIES_PER_SIDE)
     shorts_sel = pick_with_constraints(shorts_init, k_short_target, "short", prev_short_ids, TURNOVER_MAX_SHORT, MAX_COUNTRY_WEIGHT, MIN_COUNTRIES_PER_SIDE)
 
-    # Preserve 70/30 ratio if constraints cut availability
-    final_L = len(longs_sel)
-    final_S = len(shorts_sel)
-    if final_L + final_S > 0:
-        max_total_given_picks = min(int(math.floor(final_L / 0.70)), int(math.floor(final_S / 0.30)))
-        if max_total_given_picks > 0:
-            want_L = int(round(0.70 * max_total_given_picks))
-            want_S = max_total_given_picks - want_L
-            if final_L > want_L:
-                longs_sel = longs_sel.sort_values([MODEL_COL,"id"], ascending=[False,True]).head(want_L)
-            if final_S > want_S:
-                shorts_sel = shorts_sel.sort_values([MODEL_COL,"id"], ascending=[True,True]).head(want_S)
-
+    # Note: no down-sizing to keep exact 70/30; we keep as many as allowed within caps/availability.
     return longs_sel.reset_index(drop=True), shorts_sel.reset_index(drop=True)
 
 def build_long_short(pred_like: pd.DataFrame, label: str):
@@ -589,7 +614,7 @@ def build_long_short(pred_like: pd.DataFrame, label: str):
     prev_long_ids, prev_short_ids = set(), set()
     for (y, m), dfm in groups:
         ldf, sdf = select_portfolios_one_month(
-            dfm, MODEL_COL, TOP_EACH_CAP, MIN_TOTAL, PERCENTILE,
+            dfm, MODEL_COL, MIN_TOTAL, PERCENTILE,
             prev_long_ids=prev_long_ids,
             prev_short_ids=prev_short_ids,
             turnover_max_long=TURNOVER_MAX_LONG,
