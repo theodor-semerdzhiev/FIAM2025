@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.formula.api as sm
 import matplotlib.pyplot as plt
-from pandas.tseries.offsets import MonthEnd
+from pandas.tseries.offsets import MonthEnd, MonthBegin  # <-- MonthBegin added for turnover logic
 
 # ------------------------------
 # Config
@@ -40,31 +40,22 @@ MAX_SHORT     = 75                    # max short names
 # ==============================
 # STRICT Liquidity rules (time-t)
 # ==============================
-# Philosophy:
-#  - Treat *any* missing proxy as illiquid (strict).
-#  - Zero-trade fractions: low tolerance (>= 10%) over any horizon ⇒ illiquid.
-#  - Dollar volume & turnover: use *monthly cross-sectional* low-quantile cutoffs (e.g., bottom 30%) ⇒ illiquid.
-#  - Bid-ask (21d HL proxy): use *monthly cross-sectional* high-quantile cutoff (e.g., top 70%) ⇒ illiquid.
-#  - Also keep absolute "zero" checks (==0) for volume/turnover.
-#
-# If you want to dial strictness up/down, tweak the *_Q* quantiles or absolute thresholds below.
 STRICT_ZERO_TRADE_THRESH = {
-    "zero_trades_21d": 0.2,    # >= 10% zero-trade days in last 21d ⇒ illiquid
-    "zero_trades_126d": 0.3,   # >= 10% over 6m
-    "zero_trades_252d": 0.3    # >= 10% over 12m
+    "zero_trades_21d": 0.2,
+    "zero_trades_126d": 0.3,
+    "zero_trades_252d": 0.3
 }
 
 # Cross-sectional quantiles (computed each char-month t on the *feature* file)
-DOLVOL_LOW_Q     = 0.20   # bottom 30% dollar volume ⇒ illiquid
-TURNOVER_LOW_Q   = 0.20   # bottom 30% turnover ⇒ illiquid
-BIDASK_HIGH_Q    = 0.80   # top 30% (>= 70th pct) bid-ask HL ⇒ illiquid
+DOLVOL_LOW_Q     = 0.20
+TURNOVER_LOW_Q   = 0.20
+BIDASK_HIGH_Q    = 0.80
 
-# Optional absolute clamps (kept strict but scale-free). Leave as None to skip.
-# (Because units can vary by dataset, we rely primarily on quantiles; zeros always fail.)
-ABS_MIN_PRICE    = 0.00   # < $2 ⇒ illiquid (set None to disable)
-ABS_MAX_BIDASKHL = 0.25   # if bidaskhl_21d > 0.25 ⇒ illiquid (set None to disable)
+# Optional absolute clamps
+ABS_MIN_PRICE    = 0.00
+ABS_MAX_BIDASKHL = 0.25
 
-# Column names (must match FEATURES_PATH columns if present)
+# Column names
 LIQ_COLS = {
     "zero_trades_21d",
     "zero_trades_126d",
@@ -73,20 +64,20 @@ LIQ_COLS = {
     "turnover_126d"
 }
 BIDASK_COL = "bidaskhl_21d"   # optional
-PRICE_COL  = "prc"            # optional penny stock filter
+PRICE_COL  = "prc"            # optional
 
 # ---- Concentration + turnover caps ----
-MAX_COUNTRY_WEIGHT = 0.75   # no country > 75% of long AUM or short AUM
-MIN_COUNTRIES_PER_SIDE = 2  # enforce >= 2 countries represented per side
-TURNOVER_MAX_LONG  = 0.45   # at most 50% of long book can turn over month-to-month
-TURNOVER_MAX_SHORT = 0.45   # at most 50% of short book can turn over month-to-month
+MAX_COUNTRY_WEIGHT = 0.75
+MIN_COUNTRIES_PER_SIDE = 2
+TURNOVER_MAX_LONG  = 0.45
+TURNOVER_MAX_SHORT = 0.45
 
 # ---- Constant 70/30 exposure weights for the L/S strategy ----
-LONG_WEIGHT  = 1.50         # 70% long notional weight
-SHORT_WEIGHT = 0.50         # 30% short notional weight
+LONG_WEIGHT  = 1.50
+SHORT_WEIGHT = 0.50
 
-# ---- NEW: Starting AUM (used for realistic share & dollar allocations AND plot baselines) ----
-AUM_START = 500_000_000.0   # $500 million
+# ---- NEW: Starting AUM ----
+AUM_START = 500_000_000.0
 
 PLOTS_DPI = 220
 
@@ -136,7 +127,6 @@ def hac_capm_alpha(port_ls: pd.Series, mkt: pd.DataFrame) -> dict:
     ols = sm.ols("port_ls_rf ~ mkt_rf", data=df).fit(cov_type="HAC", cov_kwds={"maxlags":3}, use_t=True)
     alpha = float(ols.params.get("Intercept", np.nan))
     tstat = float(ols.tvalues.get("Intercept", np.nan))
-    # annualized Info Ratio from monthly alpha / residual std
     if getattr(ols, "mse_resid", None) is not None and ols.mse_resid > 0:
         ir_ann = alpha / np.sqrt(ols.mse_resid) * np.sqrt(12)
     else:
@@ -147,7 +137,6 @@ def compute_summary_stats(mp: pd.DataFrame, mkt_df: pd.DataFrame, label: str) ->
     """One summary row per variant."""
     row = {"variant": label}
     if mp.empty:
-        # fill with NaNs
         keys = ["mean_monthly","vol_monthly","sharpe_ann","cagr","max_dd_log",
                 "max_1m_loss","alpha","alpha_t","ir_annual","hit_rate","skew","kurt"]
         for k in keys: row[k] = np.nan
@@ -167,45 +156,67 @@ def compute_summary_stats(mp: pd.DataFrame, mkt_df: pd.DataFrame, label: str) ->
     row.update(capm)
     return row
 
-# --- NEW: price-based equal-dollar (by share count) allocator using full AUM per side ---
+# --- NEW: turnover_count identical to your reference file (membership-change method) ---
+def turnover_count(df_side: pd.DataFrame) -> float:
+    """
+    df_side: rows for a single side (long or short) across months with columns ['id','date']
+    Measures average % replaced month-to-month (1 - overlap/previous_count).
+    """
+    if df_side.empty:
+        return np.nan
+
+    side = df_side[["id","date"]].copy()
+    side["month_start"] = (side["date"] - MonthBegin(1)).dt.normalize() + MonthBegin(1)
+    side["month_start"] = side["month_start"].dt.to_period("M").dt.to_timestamp()
+
+    membership = (side.groupby("month_start")["id"]
+                  .apply(lambda s: set(s.unique()))
+                  .sort_index())
+
+    months = membership.index.to_list()
+    if len(months) < 2:
+        return 0.0
+
+    turnovers = []
+    for i in range(1, len(months)):
+        prev_set = membership.iloc[i-1]
+        cur_set  = membership.iloc[i]
+        if len(prev_set) == 0:
+            continue
+        overlap = len(prev_set.intersection(cur_set))
+        replaced_rate = (len(prev_set) - overlap) / len(prev_set)
+        turnovers.append(replaced_rate)
+
+    return float(np.mean(turnovers)) if turnovers else 0.0
+
+# --- NEW: price-based equal-dollar allocator ---
 def _price_equalized_shares_and_weights(prices: pd.Series, side_capital: float):
-    """
-    Given prices for a set of names in one side (all longs or all shorts) and the
-    dollar capital allocated to that side, compute integer share counts that target
-    equal *dollar* per name using the largest price as the base unit, then scale to
-    fully deploy side_capital. Returns (shares_dict, weights_dict).
-    """
     pr = prices.astype(float).abs().replace(0, np.nan).dropna()
     if pr.empty or side_capital <= 0:
         return {}, {}
 
-    # Use the largest price as the base dollar unit. "Just use the largest value."
     maxp = float(pr.max())
-    # Base lot: ~equal dollars ≈ maxp for each name → shares_i ≈ round(maxp / p_i), at least 1
     base_shares = np.maximum(1, np.rint(maxp / pr).astype(int))
     base_cost = float((base_shares * pr).sum())
     if base_cost <= 0:
         return {}, {}
 
-    # Scale the base lot to spend as much of the side_capital as possible
     lots = max(1, int(side_capital // base_cost))
     shares = (base_shares * lots).astype(int)
 
-    # Greedy top-up with remaining cash, preferring higher-priced names first
     spent = float((shares * pr).sum())
     cash = side_capital - spent
     if cash > 0:
         order = pr.sort_values(ascending=False)
         for idx, price in order.items():
             if cash >= price:
-                extra = int(cash // price)  # buy as many as possible of this name
+                extra = int(cash // price)
                 if extra > 0:
                     shares.loc[idx] += extra
                     cash -= extra * price
             if cash < pr.min():
                 break
 
-    # Final weights per name (sum to ~1)
     weights = (shares * pr) / side_capital
     return shares.to_dict(), weights.to_dict()
 
@@ -264,10 +275,6 @@ feat_for_merge = feat[[c for c in proxy_cols if c in feat.columns]].copy()
 # Build cross-sectional (t) proxy cutoffs
 # -----------------------------------------
 def build_monthly_liquidity_cutoffs(feat_like: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute per (char_year,char_month) cutoffs used for strict screening.
-    Uses only 't' features so there is no look-ahead.
-    """
     grp = feat_like.groupby(["char_year","char_month"], as_index=False)
 
     def _q(s, q):
@@ -328,20 +335,15 @@ if not np.all(delta_months == 1):
 # Liquidity flag (STRICT)
 # ------------------------------
 def is_illiquid_row(row) -> bool:
-    # Missing any key proxy ⇒ illiquid (strict stance)
     needed_cols = set(LIQ_COLS) | ({BIDASK_COL} if BIDASK_COL else set()) | ({PRICE_COL} if PRICE_COL else set())
     for c in needed_cols:
         if c and c in row and pd.isna(row[c]):
             return True
 
-    # 1) Zero-trade fractions: any horizon >= threshold ⇒ illiquid
     for c, thr in STRICT_ZERO_TRADE_THRESH.items():
         if c in row and pd.notna(row[c]) and float(row[c]) >= thr:
             return True
 
-    # 2) Dollar volume + turnover:
-    #    - absolute zero ⇒ illiquid
-    #    - below (t) cross-sectional low-quantile ⇒ illiquid
     if "dolvol_126d" in row:
         v = row["dolvol_126d"]
         if pd.notna(v):
@@ -363,7 +365,6 @@ def is_illiquid_row(row) -> bool:
         else:
             return True
 
-    # 3) Bid-ask HL: above cross-sectional high-quantile OR above absolute cap ⇒ illiquid
     if BIDASK_COL and BIDASK_COL in row and pd.notna(row[BIDASK_COL]):
         ba = float(row[BIDASK_COL])
         q_hi = row.get("q_bidask_high", np.nan)
@@ -372,10 +373,8 @@ def is_illiquid_row(row) -> bool:
         if ABS_MAX_BIDASKHL is not None and ba > ABS_MAX_BIDASKHL:
             return True
     elif BIDASK_COL:
-        # missing bid-ask ⇒ illiquid (strict)
         return True
 
-    # 4) Price floor (optional, strict)
     if PRICE_COL and PRICE_COL in row:
         p = row[PRICE_COL]
         if pd.notna(p) and ABS_MIN_PRICE is not None and abs(float(p)) < ABS_MIN_PRICE:
@@ -405,7 +404,6 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
     if n == 0:
         return df_month.iloc[0:0], df_month.iloc[0:0]
 
-    # Defaults for new knobs if not provided
     if turnover_max_long is None:  turnover_max_long  = TURNOVER_MAX_LONG
     if turnover_max_short is None: turnover_max_short = TURNOVER_MAX_SHORT
     if max_country_weight is None: max_country_weight = MAX_COUNTRY_WEIGHT
@@ -413,14 +411,12 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
     if prev_long_ids is None:  prev_long_ids  = set()
     if prev_short_ids is None: prev_short_ids = set()
 
-    # Helper: ranked candidate lists (by signal) for each side
     def ranked(df, side):
         if side == "long":
             return df.sort_values([model_col,"id"], ascending=[False,True]).copy()
-        else:  # short
+        else:
             return df.sort_values([model_col,"id"], ascending=[True,True]).copy()
 
-    # Candidate pools by percentile threshold
     q_long  = df_month[model_col].quantile(1 - percentile/100.0)
     q_short = df_month[model_col].quantile(percentile/100.0)
 
@@ -430,32 +426,24 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
     longs_init  = ranked(longs_init_candidates, "long")
     shorts_init = ranked(shorts_init_candidates, "short")
 
-    # Availability from percentile pools
     avail_L = len(longs_init)
     avail_S = len(shorts_init)
 
-    # Initial targets: respect side caps and availability
     k_long_target  = min(MAX_LONG, avail_L)
     k_short_target = min(MAX_SHORT, avail_S)
 
-    # Enforce side minimums when availability allows
     if avail_L >= MIN_LONG:
         k_long_target = max(k_long_target, MIN_LONG)
     if avail_S >= MIN_SHORT:
         k_short_target = max(k_short_target, MIN_SHORT)
 
-    # Try to achieve overall minimum total if possible by adding within caps
     total_target = k_long_target + k_short_target
     if total_target < min_total:
         need = min_total - total_target
-
-        # Room to grow on each side within caps and availability
         room_L = max(0, min(MAX_LONG, avail_L) - k_long_target)
         room_S = max(0, min(MAX_SHORT, avail_S) - k_short_target)
 
-        # Fill preferring 70/30 split while adding
         while need > 0 and (room_L > 0 or room_S > 0):
-            # Desired proportions 0.70 / 0.30
             frac_L = (k_long_target + k_short_target) and (k_long_target / (k_long_target + k_short_target)) or 0.0
             if frac_L < 0.70 and room_L > 0:
                 k_long_target += 1; room_L -= 1; need -= 1; continue
@@ -465,23 +453,18 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
                 k_long_target += 1; room_L -= 1; need -= 1; continue
             break
 
-    # Never exceed total cap (should naturally fit since 175+75=250)
     if k_long_target + k_short_target > MAX_TOTAL:
-        # reduce excess biased toward maintaining 70/30; don't violate side minimums
         excess = k_long_target + k_short_target - MAX_TOTAL
         while excess > 0:
-            # remove from the side furthest above its proportion (or with more headroom above min)
             propL = k_long_target / (k_long_target + k_short_target)
             if propL > 0.70 and k_long_target > max(MIN_LONG, 0):
                 k_long_target -= 1
             elif k_short_target > max(MIN_SHORT, 0):
                 k_short_target -= 1
             else:
-                # if we can't reduce without breaking mins, break
                 break
             excess -= 1
 
-    # Helper: country-aware picker with turnover preference
     def pick_with_constraints(ranked_df, k_target, side, prev_ids, turnover_cap, max_ctry_wt, min_ctrys):
         rd = ranked_df.copy()
         if "excntry" not in rd.columns:
@@ -508,19 +491,16 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
             ctry_counts[c] += 1
             return True
 
-        # Pass 1: keep previous holdings up to min_keep while respecting caps
         for _, row in rd_prev.iterrows():
             if len(selected_rows) >= min_keep:
                 break
             try_add(row)
 
-        # Pass 2: fill remaining slots
         for _, row in pd.concat([rd_prev, rd_new], ignore_index=True).iterrows():
             if len(selected_rows) >= k_target:
                 break
             try_add(row)
 
-        # Relax country cap if needed
         relax_step = 0
         while len(selected_rows) < k_target and relax_step < 3:
             relax_step += 1
@@ -539,7 +519,6 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
 
         sel = pd.DataFrame(selected_rows).reset_index(drop=True)
 
-        # Enforce minimum number of countries (swap if needed)
         def ensure_min_countries(sel_df):
             uniq = sel_df["excntry"].nunique()
             if uniq >= min_ctrys:
@@ -560,7 +539,6 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
 
         sel = ensure_min_countries(sel)
 
-        # Rebalance if over country cap due to swaps
         def rebalance_caps(sel_df):
             counts = sel_df["excntry"].value_counts().to_dict()
             over = {c: cnt for c, cnt in counts.items() if cnt > max_count}
@@ -594,7 +572,6 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
 
         sel = rebalance_caps(sel)
 
-        # Final size enforcement
         if len(sel) > k_target:
             if side == "long":
                 sel = sel.sort_values([model_col,"id"], ascending=[False,True]).head(k_target)
@@ -605,13 +582,17 @@ def select_portfolios_one_month(df_month: pd.DataFrame,
     longs_sel  = pick_with_constraints(longs_init,  k_long_target,  "long",  prev_long_ids,  TURNOVER_MAX_LONG,  MAX_COUNTRY_WEIGHT, MIN_COUNTRIES_PER_SIDE)
     shorts_sel = pick_with_constraints(shorts_init, k_short_target, "short", prev_short_ids, TURNOVER_MAX_SHORT, MAX_COUNTRY_WEIGHT, MIN_COUNTRIES_PER_SIDE)
 
-    # Note: no down-sizing to keep exact 70/30; we keep as many as allowed within caps/availability.
     return longs_sel.reset_index(drop=True), shorts_sel.reset_index(drop=True)
 
 def build_long_short(pred_like: pd.DataFrame, label: str):
     groups = pred_like.groupby(["year","month"], sort=True, as_index=False)
     long_rows, short_rows = [], []
     prev_long_ids, prev_short_ids = set(), set()
+
+    # change logs and turnover tracking containers
+    change_rows = []
+    turnover_records = {}
+
     for (y, m), dfm in groups:
         ldf, sdf = select_portfolios_one_month(
             dfm, MODEL_COL, MIN_TOTAL, PERCENTILE,
@@ -623,8 +604,41 @@ def build_long_short(pred_like: pd.DataFrame, label: str):
             min_countries_per_side=MIN_COUNTRIES_PER_SIDE
         )
 
-        # --- NEW: compute realistic shares & dollar weights using prices at t (PRICE_COL) ---
-        # Long side allocation (70% of AUM_START)
+        curr_long_ids  = set(ldf["id"].tolist())
+        curr_short_ids = set(sdf["id"].tolist())
+
+        # --- Turnover per side using the reference logic (membership change only) ---
+        def _side_changes_and_turnover(curr, prev, side):
+            added   = sorted(list(curr - prev))
+            removed = sorted(list(prev - curr))
+            kept    = sorted(list(curr & prev))
+            prev_count = len(prev)
+            # Reference turnover: (prev_count - overlap) / prev_count = removed / prev_count
+            if prev_count > 0:
+                overlap = len(kept)
+                turnover = (prev_count - overlap) / prev_count
+            else:
+                turnover = np.nan
+            # still log changes (added/kept/removed) for your CSVs
+            for _id in added:
+                change_rows.append({"year": y, "month": m, "side": side, "change": "added", "id": _id, "variant": label})
+            for _id in kept:
+                change_rows.append({"year": y, "month": m, "side": side, "change": "kept", "id": _id, "variant": label})
+            for _id in removed:
+                change_rows.append({"year": y, "month": m, "side": side, "change": "removed", "id": _id, "variant": label})
+            return turnover
+
+        long_turn  = _side_changes_and_turnover(curr_long_ids,  prev_long_ids,  "long")
+        short_turn = _side_changes_and_turnover(curr_short_ids, prev_short_ids, "short")
+
+        if np.isnan(long_turn) and np.isnan(short_turn):
+            overall_turn = np.nan
+        else:
+            overall_turn = (0.70 * (0 if np.isnan(long_turn) else long_turn)) + (0.30 * (0 if np.isnan(short_turn) else short_turn))
+
+        turnover_records[(y, m)] = {"long_turnover": long_turn, "short_turnover": short_turn, "overall_turnover": overall_turn}
+
+        # Realistic shares & dollar weights
         if not ldf.empty and PRICE_COL in ldf.columns and ldf[PRICE_COL].notna().any():
             shares_L, wts_L = _price_equalized_shares_and_weights(ldf[PRICE_COL], AUM_START * LONG_WEIGHT)
             ldf = ldf.copy()
@@ -639,7 +653,6 @@ def build_long_short(pred_like: pd.DataFrame, label: str):
                 ldf["shares"] = []
                 ldf["dollar_wt"] = []
 
-        # Short side allocation (30% of AUM_START) — same logic for sizing; weights are positive
         if not sdf.empty and PRICE_COL in sdf.columns and sdf[PRICE_COL].notna().any():
             shares_S, wts_S = _price_equalized_shares_and_weights(sdf[PRICE_COL], AUM_START * SHORT_WEIGHT)
             sdf = sdf.copy()
@@ -658,13 +671,13 @@ def build_long_short(pred_like: pd.DataFrame, label: str):
         sdf = sdf.assign(year=y, month=m, side="short", variant=label)
         long_rows.append(ldf)
         short_rows.append(sdf)
-        prev_long_ids = set(ldf["id"].tolist())
-        prev_short_ids = set(sdf["id"].tolist())
+        prev_long_ids = curr_long_ids
+        prev_short_ids = curr_short_ids
 
     long_df  = pd.concat(long_rows,  ignore_index=True) if long_rows  else pred_like.iloc[0:0]
     short_df = pd.concat(short_rows, ignore_index=True) if short_rows else pred_like.iloc[0:0]
 
-    # --- CHANGED: compute monthly returns using dollar weights from shares (price-equalized) ---
+    # Weighted monthly returns
     def _weighted_mean(group, col_val="stock_ret", col_w="dollar_wt"):
         w = group[col_w].astype(float).replace([np.inf, -np.inf], np.nan).fillna(0.0)
         v = group[col_val].astype(float).fillna(0.0)
@@ -684,7 +697,18 @@ def build_long_short(pred_like: pd.DataFrame, label: str):
                       .merge(counts_short, on=["year","month"], how="left"))
     monthly["n_total"] = monthly["n_long"] + monthly["n_short"]
     monthly["variant"] = label
-    return long_df, short_df, monthly
+
+    # Attach per-month turnover stats (membership-change method)
+    if turnover_records:
+        trn = pd.DataFrame(
+            [dict(year=k[0], month=k[1], **v) for k, v in turnover_records.items()]
+        )
+        monthly = monthly.merge(trn, on=["year","month"], how="left")
+
+    # Change log dataframe
+    changes_df = pd.DataFrame(change_rows) if change_rows else pred_like.iloc[0:0]
+
+    return long_df, short_df, monthly, changes_df
 
 # ------------------------------
 # Build universes / variants
@@ -706,11 +730,14 @@ variants = {
 ls_outputs = {}
 for label, uni in variants.items():
     print(f"Selecting portfolios for {label} (n={len(uni):,})…")
-    long_df, short_df, monthly = build_long_short(uni, label)
-    ls_outputs[label] = {"long_df": long_df, "short_df": short_df, "monthly": monthly}
+    long_df, short_df, monthly, changes = build_long_short(uni, label)
+    ls_outputs[label] = {"long_df": long_df, "short_df": short_df, "monthly": monthly, "changes": changes}
     if not monthly.empty:
         outp = os.path.join(CSV_DIR, f"monthly_ls_{label}.csv")
         monthly.sort_values(["year","month"]).to_csv(outp, index=False)
+    if isinstance(changes, pd.DataFrame) and not changes.empty:
+        changes_outp = os.path.join(CSV_DIR, f"changes_{label}.csv")
+        changes.sort_values(["year","month","side","change","id"]).to_csv(changes_outp, index=False)
 
 # Load market once
 mkt = pd.read_csv(MKT_PATH)  # columns: year, month, ret, rf
@@ -724,7 +751,18 @@ for label, out in ls_outputs.items():
     mp = out["monthly"].sort_values(["year","month"]).reset_index(drop=True)
     if not mp.empty:
         mp = mp.merge(mkt[["year","month","ret","rf"]], on=["year","month"], how="inner")
-    summary_rows.append(compute_summary_stats(mp, mkt, label))
+    row = compute_summary_stats(mp, mkt, label)
+
+    # --- Average turnover stats using the new definition ---
+    monthly_src = ls_outputs[label]["monthly"]
+    if not monthly_src.empty:
+        row["avg_long_turnover"]    = float(monthly_src["long_turnover"].dropna().mean()) if "long_turnover" in monthly_src else np.nan
+        row["avg_short_turnover"]   = float(monthly_src["short_turnover"].dropna().mean()) if "short_turnover" in monthly_src else np.nan
+        row["avg_overall_turnover"] = float(monthly_src["overall_turnover"].dropna().mean()) if "overall_turnover" in monthly_src else np.nan
+    else:
+        row["avg_long_turnover"] = row["avg_short_turnover"] = row["avg_overall_turnover"] = np.nan
+
+    summary_rows.append(row)
 
 summary_df = pd.DataFrame(summary_rows)
 summary_df.to_csv(os.path.join(CSV_DIR, "summary_stats_by_variant.csv"), index=False)
@@ -738,7 +776,6 @@ print("Building L–S visualizations & CSVs…")
 # A) L–S Equity curves: LIQ_ONLY vs ILLIQ_ONLY vs BASE
 def ls_curve_from_monthly(mp: pd.DataFrame):
     mp = mp.sort_values(["year","month"]).reset_index(drop=True)
-    # Scale to AUM_START and shift one period so first plotted point is exactly AUM_START
     mp["equity_ls"] = (equity_curve(mp["port_ls"]) * AUM_START).shift(1, fill_value=AUM_START)
     return mp
 
@@ -758,7 +795,6 @@ plt.figure(figsize=(12,6))
 for key in ["LIQ_ONLY", "ILLIQ_ONLY", "BASE"]:
     mp = ls_outputs[key]["monthly"]
     if len(mp)==0: continue
-    # Use shifted equity so every series starts at $AUM_START
     ec = (equity_curve(mp.sort_values(["year","month"])["port_ls"]) * AUM_START).shift(1, fill_value=AUM_START)
     plt.plot(range(len(ec)), ec, label=key, linewidth=2)
 plt.ylabel(f"Equity (L–S, ${AUM_START:,.0f} start)")
@@ -774,7 +810,6 @@ plt.close()
 def align_with_market(mp):
     out = mp.merge(mkt[["year","month","ret","rf"]], on=["year","month"], how="inner")
     out = out.sort_values(["year","month"]).reset_index(drop=True)
-    # Shift all cumulative lines so the first point is AUM_START
     out["mkt_ec"] = (equity_curve(out["ret"]) * AUM_START).shift(1, fill_value=AUM_START)
     out["rf_ec"]  = (equity_curve(out["rf"])  * AUM_START).shift(1, fill_value=AUM_START)
     out["ls_ec"]  = (equity_curve(out["port_ls"]) * AUM_START).shift(1, fill_value=AUM_START)
@@ -818,7 +853,6 @@ country_removed = (removed.groupby("excntry")["id"].nunique()
                    .reset_index())
 country_removed.to_csv(os.path.join(CSV_DIR,"country_illiquid_removed_counts.csv"), index=False)
 
-# Plot: Country removals (illiquid)
 topN = country_removed.head(15)
 plt.figure(figsize=(12,6))
 plt.bar(topN["excntry"].astype(str), topN["n_removed_ids"])
@@ -851,7 +885,6 @@ for label, out in ls_outputs.items():
 picked_stats = pd.concat(picked_stats_rows, ignore_index=True) if picked_stats_rows else pd.DataFrame()
 picked_stats.to_csv(os.path.join(CSV_DIR,"picked_liquidity_stats_by_variant.csv"), index=False)
 
-# Plot & CSV: % zero-liquidity over time (universe + picked LIQ_ONLY)
 liq_monthly["date_key"] = pd.PeriodIndex(pd.to_datetime(liq_monthly["year"].astype(str)+"-"+liq_monthly["month"].astype(str)+"-01"), freq="M")
 liq_monthly[["date_key","year","month","n_universe","n_illiquid","pct_illiquid"]].to_csv(
     os.path.join(CSV_DIR,"pct_zero_liquidity_over_time_universe.csv"), index=False
@@ -879,7 +912,6 @@ plt.close()
 liq_only_monthly = ls_outputs["LIQ_ONLY"]["monthly"].copy().sort_values(["year","month"]).reset_index(drop=True)
 liq_only_monthly["time_label"] = liq_only_monthly["year"].astype(str) + "-" + liq_only_monthly["month"].astype(str).str.zfill(2)
 
-# Rolling Sharpe (expanding)
 liq_only_monthly["rolling_sharpe"] = np.nan
 for i in range(len(liq_only_monthly)):
     if i >= 1:
@@ -887,7 +919,6 @@ for i in range(len(liq_only_monthly)):
         if period.std(ddof=1) > 0:
             liq_only_monthly.loc[i, "rolling_sharpe"] = (period.mean() / period.std(ddof=1) * np.sqrt(12))
 
-# Rolling alpha vs market (expanding, HAC on each slice)
 bm = liq_only_monthly.merge(mkt, on=["year","month"], how="left")
 bm["mkt_rf"] = bm["ret"] - bm["rf"]
 bm["port_ls_rf"] = bm["port_ls"] - bm["rf"]
@@ -901,10 +932,8 @@ for i in range(len(bm)):
         except Exception:
             pass
 
-# Save CSV behind the rolling plots
 liq_only_monthly.to_csv(os.path.join(CSV_DIR,"rolling_stats_LIQ_ONLY.csv"), index=False)
 
-# Plots
 fig, axes = plt.subplots(3, 1, figsize=(14, 12))
 axes[0].bar(range(len(liq_only_monthly)), liq_only_monthly["port_ls"], alpha=0.7)
 axes[0].axhline(0, color="black", linewidth=0.5)
@@ -960,8 +989,9 @@ top_10_shorts.to_csv(os.path.join(CSV_DIR,"top_10_short_holdings_LIQ_ONLY.csv"),
 
 print("\n=== Summary outputs ===")
 print("CSV folder (./csv):")
-print(" - summary_stats_by_variant.csv        <-- one row per variant (BASE, LIQ_ONLY, ILLIQ_ONLY)")
-print(" - monthly_ls_<VARIANT>.csv            <-- per-variant monthly L/S series (returns + counts)")
+print(" - summary_stats_by_variant.csv        <-- one row per variant (BASE, LIQ_ONLY, ILLIQ_ONLY) + avg_*_turnover")
+print(" - monthly_ls_<VARIANT>.csv            <-- per-variant monthly L/S series (returns + counts + turnover stats)")
+print(" - changes_<VARIANT>.csv               <-- per-variant per-month change log (added/kept/removed by side)")
 print(" - ls_equity_liquid_vs_illiquid_vs_base.csv")
 print(" - sp500_vs_our_LS_<VARIANT>.csv       (BASE, LIQ_ONLY, ILLIQ_ONLY)")
 print(" - liquidity_universe_monthly.csv")
