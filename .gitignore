@@ -8,6 +8,7 @@ ret_sample.csv
 *.json
 data_exploration.ipynb
 \.venv
+\.venv_311
 \.conda
 \catboost_info
 \saved_safe
@@ -24,3 +25,7 @@ Team Prize Distribution Agreement.docx
 Team Prize Distribution Agreement.pdf
 \figs
 \csv
+.DS_Store
+test_models/qlattice_models/
+test_models/qlattice_yearly/
+*.zip
