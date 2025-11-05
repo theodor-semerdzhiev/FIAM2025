@@ -125,42 +125,32 @@ def load_global_map(file_path):
     """
     print(f"Loading global map from '{file_path}'...")
     try:
-        # Assuming the CSV has headers as seen in your screenshot:
-        # fic,gvkey,datadate,iid,conm
-        # UPDATE: Your screenshot shows NO header. The `except` block is correct.
-        df_map = pd.read_csv(file_path)
+        # User log shows DtypeWarning, so header=0 (default) is correct
+        df_map = pd.read_csv(file_path, low_memory=False)
     except Exception as e:
-        # This block should be running
-        print(f"Info: Error loading CSV with header (expected): {e}")
-        print("Attempting to load without a header...")
-        df_map = pd.read_csv(file_path, header=None)
-        # Manually assign headers based on your screenshots
-        # The first column is empty in your screenshot, let's call it 'fic'
-        # and assume the CSV reader handles the leading comma.
-        # If the first col is BLANK, use this:
-        # df_map.columns = ['blank', 'fic', 'gvkey', 'datadate', 'iid', 'conm'] + [f'col_{i}' for i in range(6, len(df_map.columns))]
-        # Let's try the original assumption:
-        try:
-             df_map.columns = ['fic', 'gvkey', 'datadate', 'iid', 'conm'] + [f'col_{i}' for i in range(5, len(df_map.columns))]
-        except:
-             print("CRITICAL ERROR: Column count mismatch loading global_map. Check file.")
-             print(f"File has {len(df_map.columns)} columns.")
-             return pd.DataFrame()
-
+        print(f"Error loading CSV with header: {e}")
+        return pd.DataFrame()
     
     # Keep only the *unique combinations* of name, fic, gvkey, and iid.
-    # This slims down the file from monthly rows to one row per *security*.
-    # This is the key to solving your share class problem.
     id_cols = ['conm', 'fic', 'gvkey', 'iid']
+    if not all(col in df_map.columns for col in id_cols):
+        # This check might fail if the user's headerless load was correct
+        # Let's re-add the headerless logic just in case
+        print("Header load failed to find columns, trying headerless...")
+        try:
+            df_map = pd.read_csv(file_path, header=None, low_memory=False)
+            df_map.columns = ['fic', 'gvkey', 'datadate', 'iid', 'conm'] + [f'col_{i}' for i in range(5, len(df_map.columns))]
+        except Exception as e2:
+             print(f"CRITICAL ERROR: Could not load global_map. Error: {e2}")
+             return pd.DataFrame()
+
+    # Re-check columns
     if not all(col in df_map.columns for col in id_cols):
         print(f"ERROR: Global map is missing required columns. Found: {df_map.columns}")
         return pd.DataFrame()
         
-    # --- !! POTENTIAL BUG FIX: Strip whitespace from FIC !! ---
-    # Sometimes "CHN " != "CHN"
     if pd.api.types.is_string_dtype(df_map['fic']):
         df_map['fic'] = df_map['fic'].str.strip()
-    # --- End Fix ---
         
     df_map_unique = df_map[id_cols].drop_duplicates().copy()
     print(f"Global map contains {len(df_map_unique)} unique securities.")
@@ -174,21 +164,22 @@ def load_ret_sample(file_path):
     df_ret = pd.read_parquet(file_path)
     
     # Convert the linking date 'char_eom' to datetime.
-    # This is the 'time t' date, which matches our 'period_end_date'.
-    df_ret['char_eom'] = pd.to_datetime(df_ret['char_eom'])
+    if 'char_eom' not in df_ret.columns:
+        print("CRITICAL ERROR: 'char_eom' column not found in ret_sample.parquet!")
+        return pd.DataFrame()
+        
+    df_ret['char_eom'] = pd.to_datetime(df_ret['char_eom'], format='%Y%m%d', errors='coerce')
     print(f"Loaded {len(df_ret)} return observations.")
+    
     return df_ret
 
 def main():
-    # 1. Load Embeddings
     df_embeddings = load_all_batches(EMBEDDING_BATCH_DIR)
     if df_embeddings.empty: return
-    
-    # 2. Load Global Map
+
     df_global_map = load_global_map(GLOBAL_MAP_PATH)
     if df_global_map.empty: return
-    
-    # 3. Load Returns Data
+
     df_ret_sample = load_ret_sample(RET_SAMPLE_PATH)
     if df_ret_sample.empty: return
 
@@ -197,10 +188,6 @@ def main():
     print("\n--- Preparing Data for Merging ---")
     
     # A. Prepare Embeddings DataFrame
-    # - Map country name ("Sweden") to FIC code ("SWE")
-    # - Normalize company name for fuzzy matching
-    
-    # Check for columns before processing
     if 'country' not in df_embeddings.columns:
         print("ERROR: 'country' column not found in loaded embedding files.")
         return
@@ -211,41 +198,33 @@ def main():
         print("ERROR: 'period_end_date' column not found in loaded embedding files.")
         return
 
-    # --- !! POTENTIAL BUG FIX: Strip whitespace from country !! ---
     if pd.api.types.is_string_dtype(df_embeddings['country']):
         df_embeddings['country'] = df_embeddings['country'].str.strip()
-    # --- End Fix ---
 
     df_embeddings['fic'] = df_embeddings['country'].map(COUNTRY_TO_FIC_MAP)
     df_embeddings['normalized_name'] = df_embeddings['company_name'].apply(normalize_name)
-    # Ensure date is in correct format (it should be already, but good to check)
     df_embeddings['period_end_date'] = pd.to_datetime(df_embeddings['period_end_date'])
     
     # B. Prepare Global Map DataFrame
-    # - Normalize 'conm' (company name) for fuzzy matching
     df_global_map['normalized_name'] = df_global_map['conm'].apply(normalize_name)
     
     # Drop rows that failed normalization
     df_embeddings = df_embeddings.dropna(subset=['normalized_name', 'period_end_date'])
-    # We drop 'fic' NaNs *after* debugging
     df_global_map = df_global_map.dropna(subset=['normalized_name', 'fic', 'gvkey', 'iid'])
 
     print(f"Embeddings ready: {len(df_embeddings)} valid rows.")
     print(f"Global map ready: {len(df_global_map)} valid rows.")
     
     
-    # --- !! START NEW DEBUG BLOCK !! ---
+    # --- !! START DEBUG BLOCK 1 (Names) !! ---
     print("\n--- DEBUGGING MERGE 1 ---")
     
-    # 1. Check for FIC mapping failures
     nan_fics = df_embeddings['fic'].isna().sum()
     print(f"DEBUG: Embeddings with NaN FIC (bad country name): {nan_fics} / {len(df_embeddings)}")
+    print(f"DEBUG: Unique FICs found in all {len(df_embeddings)} embedding rows: {df_embeddings['fic'].unique()}")
+    
     if nan_fics > 0:
         print(f"DEBUG: Unique countries found in embeddings: {df_embeddings['country'].unique()}")
-        print(f"DEBUG: Countries in our map: {list(COUNTRY_TO_FIC_MAP.keys())}")
-        if nan_fics == len(df_embeddings):
-            print("CRITICAL DEBUG: All 'fic' keys are NaN. Merge 1 will 100% fail. Check country names.")
-            return # Stop before the merge
 
     # 2. Side-by-side name comparison
     debug_fic = COUNTRY_TO_FIC_MAP.get(DEBUG_COUNTRY_NAME)
@@ -260,13 +239,7 @@ def main():
         map_sample = df_global_map[df_global_map['fic'] == debug_fic][['normalized_name', 'conm']].drop_duplicates().head(15)
         print(map_sample)
         
-        if emb_sample.empty or map_sample.empty:
-            print(f"DEBUG: No data found for {DEBUG_COUNTRY_NAME} in one of the files.")
-            
-    else:
-        print(f"DEBUG: Could not find '{DEBUG_COUNTRY_NAME}' in COUNTRY_TO_FIC_MAP.")
-        
-    print("--- END DEBUG BLOCK ---\n")
+    print("--- END DEBUG BLOCK 1 ---\n")
     
     # Now, drop NaNs from fic after we've debugged
     df_embeddings = df_embeddings.dropna(subset=['fic'])
@@ -274,7 +247,7 @@ def main():
     if df_embeddings.empty:
         print("Stopping: No embeddings left after dropping NaN FICs.")
         return
-    # --- !! END NEW DEBUG BLOCK !! ---
+    # --- !! END DEBUG BLOCK 1 !! ---
 
 
     # --- Merge 1: Embeddings + Global Map ---
@@ -294,6 +267,52 @@ def main():
     # Filter to only the successful matches
     df_linked_filings = df_merged_1.dropna(subset=['gvkey', 'iid'])
     print(f"Proceeding with {len(df_linked_filings)} linked filings.")
+    
+    
+    # --- !! START NEW DEBUG BLOCK 2 (Dates) !! ---
+    print("\n--- DEBUGGING MERGE 2 (DATES) ---")
+    
+    if df_linked_filings.empty:
+        print("DEBUG: Skipping Date check, Merge 1 returned 0 rows.")
+    else:
+        # Get the first matched (gvkey, iid) pair
+        first_match = df_linked_filings.iloc[0]
+        test_gvkey = first_match['gvkey']
+        test_iid = first_match['iid']
+        
+        print(f"DEBUG: Checking dates for a matched security: gvkey={test_gvkey}, iid={test_iid}")
+        
+        # 1. Get dates from our FILINGS for this security
+        filing_dates = df_linked_filings[
+            (df_linked_filings['gvkey'] == test_gvkey) &
+            (df_linked_filings['iid'] == test_iid)
+        ]['period_end_date'].dt.date.unique()
+        filing_dates.sort()
+        
+        print(f"\n--- Dates from FILINGS (period_end_date) ---")
+        print(filing_dates)
+        
+        # 2. Get dates from the RETURN data for this *same* security
+        return_dates = df_ret_sample[
+            (df_ret_sample['gvkey'] == test_gvkey) &
+            (df_ret_sample['iid'] == test_iid)
+        ]['char_eom'].dt.date.unique()
+        return_dates.sort()
+        
+        print(f"\n--- Dates from RET_SAMPLE (char_eom) ---")
+        print(return_dates)
+        
+        # 3. Check for any overlap
+        overlap = set(filing_dates).intersection(set(return_dates))
+        if not overlap:
+            print("\nDEBUG: CRITICAL: No date overlap found for this security!")
+            print("This is the reason Merge 2 is failing.")
+        else:
+            print(f"\nDEBUG: SUCCESS: Found {len(overlap)} overlapping dates!")
+            print(f"Example overlap: {list(overlap)[0]}")
+
+    print("--- END DEBUG BLOCK 2 ---\n")
+    
 
     # --- Merge 2: Linked Filings + Returns ---
     print("\n--- MERGE 2: Linking Filings to Returns ---")
@@ -315,22 +334,15 @@ def main():
             df_final_data.to_pickle(OUTPUT_FILE_PATH)
             print(f"\nSuccessfully saved final merged data to:")
             print(f"{OUTPUT_FILE_PATH}")
-            print("\nFinal DataFrame columns:")
-            print(df_final_data.columns.tolist())
         else:
             print("WARNING: Final dataset is empty (Merge 2 failed).")
 
     # --- Final Report ---
     print("\n--- MERGING COMPLETE ---")
-    if 'df_final_data' not in locals():
+    if 'df_final_data' not in locals() or df_final_data.empty:
          print("Total final rows linked to a T+1 return: 0")
          print("WARNING: Final dataset is empty.")
-         print("Common issues:")
-         print("- Date mismatch (e.g., 2023-09-30 vs 2023-09-01) <--- CHECK THIS")
-         print("- Name normalization failed (check `normalize_name` function)")
-         print("- No temporal overlap between filings and returns")
 
 
 if __name__ == "__main__":
     main()
-

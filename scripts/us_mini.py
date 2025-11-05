@@ -9,18 +9,16 @@ from transformers import (
     Trainer,
     TrainingArguments
 )
-import psutil # For checking system RAM
-from multiprocess import freeze_support # Use the 'multiprocess' fork
+import psutil 
+from multiprocess import freeze_support 
 
 # --- Configuration ---
 
 # 1. DEFINE THE REGION AND PATHS
 region_name = "USA"
-# Base directory where the USA folder is located
 BASE_OUTPUT_DIR = r'D:\market_data\text_data' 
 USA_OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, region_name)
 
-# --- MODIFIED: Point ONLY to the new 2016 filings corpus ---
 filings_2016_file = os.path.join(USA_OUTPUT_DIR, 'usa_filings_corpus_2005_2016.txt')
 
 data_files_list = []
@@ -29,22 +27,19 @@ if os.path.exists(filings_2016_file):
     print(f"Found 2005-2016 filings corpus: {filings_2016_file}")
 else:
     print(f"ERROR: 2005-2016 filings corpus not found at {filings_2016_file}")
-    print("Please run the 'preprocess_filings_2016.py' script first.")
     exit()
-# --- END MODIFICATION ---
+
 
 
 # 2. CHOOSE BASE MODEL AND OUTPUT DIRECTORY
 base_model_name = 'roberta-base'
-# --- MODIFIED: New output model name ---
 output_model_dir = f'./{region_name}-fin-roberta-filings-2016'
 
 # 3. TRAINING HYPERPARAMETERS
-# --- MODIFIED: Increased epochs since dataset is smaller ---
-num_train_epochs = 1 # Let's train for 3 full passes
-per_device_train_batch_size = 32 # Keep this as high as your VRAM allows
-gradient_accumulation_steps = 1  # Keep this at 1 for max speed
-save_steps = 10000 # Save a checkpoint every 10,000 steps
+num_train_epochs = 1 
+per_device_train_batch_size = 32 
+gradient_accumulation_steps = 1  
+save_steps = 10000 
 logging_steps = 500
 max_seq_length = 256
 learning_rate=5e-5
@@ -102,7 +97,7 @@ def main():
     print(f"Available System RAM: {ram_gb:.2f} GB")
     num_cpus = os.cpu_count()
     
-    # Use more processes if you have RAM, but 1-2 is fine on your low-RAM system
+    # Use more processes if you have RAM, but 1-2 is fine on low-RAM systems
     num_proc_tokenizer = 1 if ram_gb < 8 else max(1, min(num_cpus // 2, 4))
     print(f"Using {num_proc_tokenizer} processes for tokenization.")
 
@@ -142,9 +137,9 @@ def main():
         gradient_accumulation_steps=gradient_accumulation_steps,
         save_strategy="steps",
         save_steps=save_steps,
-        save_total_limit=2, # Keeps the 2 most recent checkpoints
+        save_total_limit=2,
         prediction_loss_only=True,
-        fp16=gpu_available, # Use mixed precision if GPU is available
+        fp16=gpu_available,
         logging_steps=logging_steps,
         learning_rate=learning_rate,
         report_to="none",
@@ -176,5 +171,5 @@ def main():
 
 
 if __name__ == "__main__":
-    freeze_support() # Call this first
-    main()           # Then call main()
+    freeze_support() 
+    main()           

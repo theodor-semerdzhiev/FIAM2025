@@ -14,11 +14,13 @@ tqdm.pandas()
 # --- Configuration ---
 
 # --- !! 1. SET YOUR MODEL PATH !! ---
-MODEL_PATH = r'D:\market_data\text_data\CHECKPOINTS\ASIA_PACIFIC-fin-roberta\checkpoint-9600'
+MODEL_PATH = r'D:\market_data\text_data\CHECKPOINTS\GERMANIC_MAINLAND-fin-roberta\checkpoint-3786'
 
 # --- !! 2. SET THE COUNTRIES FOR THIS MODEL !! ---
-COUNTRIES_TO_PROCESS = ['China', 'Hong Kong', 'Japan', 'Singapore', 'South Korea', 'Taiwan'] # <-- SET THIS!
+# COUNTRIES_TO_PROCESS = ['China', 'Hong Kong', 'Japan', 'Singapore', 'South Korea', 'Taiwan'] # <-- SET THIS!
 # COUNTRIES_TO_PROCESS = ['Canada']
+# COUNTRIES_TO_PROCESS = ['United Kingdom', 'Ireland', 'Australia']
+COUNTRIES_TO_PROCESS = ['Germany', 'Austria', 'Switzerland', 'Netherlands', 'Belgium', 'Luxembourg']
 
 # --- !! 3. SET YOUR DATA AND OUTPUT PATHS !! ---
 TEXT_DATA_PATH = r'C:\_Files\School\Competitions\FIAM2025\data\global_text_data' 

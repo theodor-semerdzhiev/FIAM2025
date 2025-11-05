@@ -9,14 +9,13 @@ from transformers import (
     Trainer,
     TrainingArguments
 )
-import psutil # For checking system RAM
-from multiprocess import freeze_support # Use the 'multiprocess' fork
+import psutil 
+from multiprocess import freeze_support 
 
 # --- Configuration ---
 
 # 1. DEFINE THE REGION AND PATHS
 REGION_NAME = "ANGLOSPHERE_COMMONLAW"
-
 
 CORPUS_FILE_PATH = r'D:\market_data\text_data\REGIONS\ANGLOSPHERE_COMMONLAW_corpus.txt' # <-- SET THIS
 
@@ -35,16 +34,14 @@ else:
 
 # 2. CHOOSE BASE MODEL AND OUTPUT DIRECTORY
 base_model_name = 'roberta-base'
-# --- MODIFIED: New output model name and location ---
 output_model_dir = os.path.join(CHECKPOINT_BASE_DIR, f'{REGION_NAME}-fin-roberta')
 
 # 3. TRAINING HYPERPARAMETERS
-# --- MODIFIED: Increased epochs since dataset is much smaller ---
-num_train_epochs = 5 # 4gb is med, let's train for 2 full passes
-per_device_train_batch_size = 32 # Keep this as high as your VRAM allows
-gradient_accumulation_steps = 1  # Keep this at 1 for max speed
-save_steps = 2000 # Save a checkpoint every 2,000 steps (more frequent for small dataset)
-logging_steps = 200 # Log more frequently
+num_train_epochs = 5 
+per_device_train_batch_size = 32 
+gradient_accumulation_steps = 1  
+save_steps = 2000 
+logging_steps = 200 
 max_seq_length = 256
 learning_rate=5e-5
 
