@@ -30,6 +30,13 @@ try:
 except Exception as e:
     raise ImportError("CatBoost is required. Install with: pip install catboost") from e
 
+# --- QLATTICE API (ADDED) ---
+try:
+    from klattice_predictions import predict_for_year as qlat_predict
+except Exception as e:
+    # If the API isn't available, we keep pipeline running; inference block will handle gracefully.
+    qlat_predict = None
+
 
 # =============================
 # helpers
@@ -472,6 +479,10 @@ if __name__ == "__main__":
     # print(f"[{ts()}] Saving rank-scaled data to: {rankscaled_path}")
     # data.to_parquet(rankscaled_path, engine="pyarrow", index=False)
 
+    # --- ADDED: Keep raw (un-rankscaled) copy for QLattice inference ---
+    data_raw_for_qlat = data0.copy()
+    data_raw_for_qlat["id"] = data_raw_for_qlat["id"].astype(str)
+
     data = pd.read_parquet(rankscaled_path, engine="pyarrow")
     # NEW: force float32 to cut memory
     _float64_cols_cache = data.select_dtypes(include=["float64"]).columns
@@ -522,8 +533,8 @@ if __name__ == "__main__":
     def _append_preds(df: pd.DataFrame, path: str):
         """Append predictions to CSV with header only if file is new/empty."""
         # Ensure consistent column order across iterations
-        desired = ["year","month","ret_eom", id_col, ret_var, date_col, "ridge","xgb","cat","blend",
-                "iter","train_start","train_end","val_end","test_end"]
+        desired = ["year","month","ret_eom", id_col, ret_var, date_col, "ridge","xgb","cat","qlat","blend",
+                "iter","train_start","train_end","val_end","test_end"]  # ADDED 'qlat'
         for c in desired:
             if c not in df.columns:
                 df[c] = np.nan
@@ -626,6 +637,60 @@ if __name__ == "__main__":
         keep_cols = ["year", "month", "ret_eom", id_col, ret_var, date_col]
         keep_cols_present = [c for c in keep_cols if c in test_std.columns]
         reg_pred = test_std[keep_cols_present].copy()
+
+        # =========================
+        # QLATTICE (pretrained yearly models) — TEST ONLY
+        # =========================
+        qlat_mse_test = None  # no validation; models are pre-trained and served via API
+        if qlat_predict is not None:
+            try:
+                # Build the exact rows for TEST from the RAW (unranked) data
+                mask_test = (data_raw_for_qlat[date_col] >= c2) & (data_raw_for_qlat[date_col] < c3)
+                test_raw_chunk = data_raw_for_qlat.loc[
+                    mask_test,
+                    [id_col, date_col] + [c for c in data_raw_for_qlat.columns if c not in (id_col, date_col)]
+                ].copy()
+
+                # Predict using the model folder for the TEST year only
+                qlat_base_dir = os.path.join(work_dir, "qlattice_yearly")
+                qlat_test_df = qlat_predict(
+                    df=test_raw_chunk,
+                    test_year=int(c2.year),              # TEST YEAR ONLY
+                    base_yearly_dir=qlat_base_dir,
+                    scale_to_validation=True,            # keep behavior of API scaling; no local validation here
+                    return_both=True,
+                    output_row="qlat"
+                )
+
+                # The API returns ['qlat_raw','qlat_scaled']; we’ll use scaled on TEST
+                qlat_test_merge = test_raw_chunk[[id_col, date_col]].copy()
+                qlat_test_merge["qlat"] = qlat_test_df["qlat_scaled"].values
+
+                # Align to the test frame (reg_pred order)
+                test_key = reg_pred[[id_col, date_col]].copy()
+                qlat_test_aligned = test_key.merge(
+                    qlat_test_merge, on=[id_col, date_col], how="left", validate="m:1"
+                )["qlat"].to_numpy(dtype=np.float32)
+
+                # In case a few rows are missing (no model folder, etc.), fill with 0
+                if np.any(pd.isna(qlat_test_aligned)):
+                    n_missing = int(np.isnan(qlat_test_aligned).sum())
+                    print(f"[{ts()}] QLattice: {n_missing} missing TEST preds; filling 0.")
+                    qlat_test_aligned = np.nan_to_num(qlat_test_aligned, nan=0.0)
+
+                # Attach to output frame
+                reg_pred["qlat"] = qlat_test_aligned
+
+                # Log TEST MSE only (no validation for QLattice)
+                qlat_mse_test = mean_squared_error(Y_test, qlat_test_aligned)
+                print(f"[{ts()}] QLattice: Test MSE={qlat_mse_test:.8f}")
+
+            except Exception as _qlat_err:
+                print(f"[{ts()}] WARNING: QLattice inference skipped this iter: {_qlat_err}")
+        else:
+            print(f"[{ts()}] WARNING: qlat_predict not available; skipping QLattice.")
+
+
 
         # =========================
         # RIDGE
@@ -768,16 +833,22 @@ if __name__ == "__main__":
             "xgb":   float(xgb_mse_val),
             "cat":   float(cat_mse_val)
         }
+        # NOTE: QLattice excluded from weights (no validation metrics by design)
+
         eps = 1e-12
         weights = {k: 1.0 / (v + eps) for k, v in mse_vals.items()}
         w_sum = sum(weights.values())
         weights = {k: v / w_sum for k, v in weights.items()}
-        print(f"[{ts()}] Blend Weights: ridge={weights['ridge']:.3f}, xgb={weights['xgb']:.3f}, cat={weights['cat']:.3f}")
+
+        print(f"[{ts()}] Blend Weights: ridge={weights.get('ridge',0):.3f}, "
+              f"xgb={weights.get('xgb',0):.3f}, cat={weights.get('cat',0):.3f}")
+
 
         blend_test = (
-            weights["ridge"] * reg_pred["ridge"].values +
-            weights["xgb"]   * reg_pred["xgb"].values +
-            weights["cat"]   * reg_pred["cat"].values
+            weights.get("ridge", 0.0) * reg_pred["ridge"].values +
+            weights.get("xgb",   0.0) * reg_pred["xgb"].values +
+            weights.get("cat",   0.0) * reg_pred["cat"].values +
+            weights.get("qlat",  0.0) * reg_pred.get("qlat", pd.Series(0.0, index=reg_pred.index)).values  # ADDED
         )
         reg_pred["blend"] = blend_test
         blend_mse_test = mean_squared_error(Y_test, blend_test)
@@ -794,6 +865,10 @@ if __name__ == "__main__":
         r2_xgb = 1 - np.sum(np.square(Y_test - preds_xgb_test)) / denom if denom != 0 else np.nan
         r2_cat = 1 - np.sum(np.square(Y_test - preds_cat_test)) / denom if denom != 0 else np.nan
         r2_blend = 1 - np.sum(np.square(Y_test - blend_test)) / denom if denom != 0 else np.nan
+        # ADDED: r² for QLattice if present
+        if "qlat" in reg_pred.columns:
+            r2_qlat = 1 - np.sum(np.square(Y_test - reg_pred["qlat"].values)) / denom if denom != 0 else np.nan
+            print(f"[{ts()}] R² (vs zero) -> QLat: {r2_qlat:.6f}")
 
         print(f"[{ts()}] R² (vs zero) -> Ridge: {r2_ridge:.6f} | XGB: {r2_xgb:.6f} | Cat: {r2_cat:.6f} | Blend: {r2_blend:.6f}")
 
@@ -823,7 +898,7 @@ if __name__ == "__main__":
     print(f"[{ts()}] Writing predictions to: {out_path}")
     if pred_out.empty:
         print(f"[{ts()}] WARNING: No predictions produced.")
-        minimal_cols = [date_col, ret_var, "ridge", "xgb", "cat", "blend"]
+        minimal_cols = [date_col, ret_var, "ridge", "xgb", "cat", "qlat", "blend"]  # ADDED 'qlat'
         pd.DataFrame(columns=minimal_cols).to_csv(out_path, index=False)
         print(f"[{ts()}] Wrote CSV with shape: (0, {len(minimal_cols)})")
     else:
@@ -839,14 +914,14 @@ if __name__ == "__main__":
         yreal = pred_out[ret_var].values
         denom = np.sum(np.square(yreal))
         print(f"[{ts()}] Denominator sum(y^2) = {denom:.8f}")
-        for model_name in ["ridge", "xgb", "cat", "blend"]:
+        for model_name in ["ridge", "xgb", "cat", "qlat", "blend"]:  # ADDED 'qlat'
             if model_name not in pred_out.columns:
                 print(f"[{ts()}] {model_name}: no predictions found.")
                 continue
             ypred = pred_out[model_name].values
             sse = np.sum(np.square((yreal - ypred)))
             r2 = 1 - sse / denom if denom != 0 else np.nan
-            print(f"[{ts()}] {model_name.UPPER():6s} | SSE={sse:.8f} | R2_zero_bench={r2:.8f}")
+            print(f"[{ts()}] {model_name.upper():6s} | SSE={sse:.8f} | R2_zero_bench={r2:.8f}")
 
     t1 = time.perf_counter()
     print(hrule())
