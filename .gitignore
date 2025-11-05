@@ -5,6 +5,7 @@ ret_sample.csv
 *.json
 \embeddings
 \global_embeds
+\global_merged
 *.bat
 C:\_Files\School\Competitions\FIAM2025\scripts\USA-fin-roberta-filings-2016
 scripts\USA-fin-roberta-largecorpus
