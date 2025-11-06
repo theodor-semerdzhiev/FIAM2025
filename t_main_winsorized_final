@@ -364,18 +364,24 @@ if __name__ == "__main__":
 
 
     # # === Merge per-id, per-date risk_score only ===
-    # aux_path = os.path.join(work_dir, "data/text_based_risk_scores.csv")  # adjust to your file name
+    # aux_path = os.path.join(work_dir, "data/text_based_risk_scores_global.csv")  # adjust to your file name
 
     # print(f"[{ts()}] Reading risk_score file: {aux_path}")
-    # aux = pd.read_csv(aux_path, usecols=["id", "date_dt", "risk_score"])
+    # aux = pd.read_csv(
+    #     aux_path,
+    #     usecols=["id", "date", "risk_score"],
+    #     dtype={"id": str, "date": str}  # ensure YYYYMMDD stays as string for safe parsing
+    # )
 
-    # # Normalize date
-    # aux["date_dt"] = parse_date_col(aux["date_dt"])
-    # aux = aux.rename(columns={"date_dt": "date"})
+    # # Normalize date: parse YYYYMMDD like 20170131 to Timestamp (naive midnight)
+    # aux["date"] = pd.to_datetime(aux["date"].str.strip(), format="%Y%m%d", errors="raise").dt.normalize()
+
+    # # Align column names/types with main frame
+    # aux = aux.rename(columns={"date": "date"})
     # aux["id"] = aux["id"].astype(str)
     # data0["id"] = data0["id"].astype(str)
 
-    # # Deduplicate if necessary
+    # # Deduplicate if necessary (last observation by (id, date) wins)
     # aux = aux.sort_values(["id", "date"]).drop_duplicates(["id", "date"], keep="last")
 
     # # Merge risk_score into main data
@@ -387,6 +393,7 @@ if __name__ == "__main__":
     # # Diagnostics
     # matched = data0["risk_score"].notna().sum()
     # print(f"[{ts()}] risk_score merged: matched {matched:,} of {len(data0):,} rows.")
+
 
     # # === NEW: Merge per-id, per-date SIMILARITY features ===
     # sim_path = os.path.join(work_dir, "data/similarity_scores.csv")
@@ -633,6 +640,11 @@ if __name__ == "__main__":
         print(f"Y_test: min={np.min(Y_test)}, max={np.max(Y_test)}, mean={np.mean(Y_test)}, std={np.std(Y_test)}")
         # ...existing code...
 
+        # --- NEW: Winsorize training target at +10.00 (1000%) — ONLY FOR TRAINING ---
+        # This caps extreme positive returns in the training target while leaving validation/testing untouched.
+        Y_train = np.minimum(Y_train, 100.0).astype(np.float32)
+        # ---------------------------------------------------------------------------
+
         # --- prediction frame skeleton ---
         keep_cols = ["year", "month", "ret_eom", id_col, ret_var, date_col]
         keep_cols_present = [c for c in keep_cols if c in test_std.columns]
@@ -700,6 +712,10 @@ if __name__ == "__main__":
         val_mse_ridge = np.zeros(len(lambdas), dtype=np.float32)  # NEW: force float32 to cut memory
         t_ridge0 = time.perf_counter()
         Y_train_dm = Y_train - np.mean(Y_train)
+        # --- NEW: ensure de-mean uses winsorized training target (training only) ---
+        # We already reassigned Y_train above to its winsorized version, so the line
+        # immediately above computes the de-meaned winsorized target.
+        # ---------------------------------------------------------------------------
         for ind, i in enumerate(lambdas):
             reg = Ridge(alpha=((10**i) * 0.5), fit_intercept=False, solver="svd")
             reg.fit(X_train, Y_train_dm)
