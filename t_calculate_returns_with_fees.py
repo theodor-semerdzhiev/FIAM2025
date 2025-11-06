@@ -22,7 +22,7 @@ from pandas.tseries.offsets import MonthEnd, MonthBegin  # <-- MonthBegin added 
 # ------------------------------
 # Config
 # ------------------------------
-PRED_PATH     = "output_final.csv"          # predictions file (must include: date, year, month, id, stock_ret, and MODEL_COL)
+PRED_PATH     = "output.csv"          # predictions file (must include: date, year, month, id, stock_ret, and MODEL_COL)
 FEATURES_PATH = "data/ret_sample.parquet"   # original features universe (for liquidity proxies, country, iid, etc.)
 MKT_PATH      = "data/mkt_ind.csv"          # market data (rf, ret) monthly
 
