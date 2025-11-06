@@ -25,6 +25,7 @@ from pandas.tseries.offsets import MonthEnd, MonthBegin  # <-- MonthBegin added 
 PRED_PATH     = "output.csv"          # predictions file (must include: date, year, month, id, stock_ret, and MODEL_COL)
 FEATURES_PATH = "data/ret_sample.parquet"   # original features universe (for liquidity proxies, country, iid, etc.)
 MKT_PATH      = "data/mkt_ind.csv"          # market data (rf, ret) monthly
+WORLD_PATH    = "data/MSCI World Index Return.csv"  # NEW: MSCI World monthly returns (date, prc, return)
 
 MODEL_COL     = "blend"               # prediction column to use
 PERCENTILE    = 1                     # top/bottom PERCENTILE% as initial threshold
@@ -146,6 +147,8 @@ def compute_summary_stats(mp: pd.DataFrame, mkt_df: pd.DataFrame, label: str) ->
         keys = ["mean_monthly","vol_monthly","sharpe_ann","cagr","max_dd_log",
                 "max_1m_loss","alpha","alpha_t","ir_annual","hit_rate","skew","kurt"]
         for k in keys: row[k] = np.nan
+        # --- Added: default beta when series is empty ---
+        row["beta"] = np.nan
         return row
     r = mp["port_ls"].copy()
     row["mean_monthly"] = float(r.mean())
@@ -160,6 +163,19 @@ def compute_summary_stats(mp: pd.DataFrame, mkt_df: pd.DataFrame, label: str) ->
     capm = hac_capm_alpha(mp[["year","month","port_ls"]].merge(mkt_df, on=["year","month"], how="inner")["port_ls"],
                           mp[["year","month"]].merge(mkt_df, on=["year","month"], how="inner"))
     row.update(capm)
+    # --- Added: beta (slope) of (port_ls - rf) vs (mkt - rf) relative to S&P 500 ---
+    try:
+        dfb = mp[["year","month","port_ls"]].merge(mkt_df[["year","month","ret","rf"]], on=["year","month"], how="inner")
+        x = (dfb["ret"] - dfb["rf"]).astype(float)
+        y = (dfb["port_ls"] - dfb["rf"]).astype(float)
+        var_x = float(x.var(ddof=1))
+        if var_x > 0 and len(dfb) >= 2:
+            cov_xy = float(np.cov(y, x, ddof=1)[0,1])
+            row["beta"] = cov_xy / var_x
+        else:
+            row["beta"] = np.nan
+    except Exception:
+        row["beta"] = np.nan
     return row
 
 # --- NEW: turnover_count identical to your reference file (membership-change method) ---
@@ -811,6 +827,15 @@ for label, uni in variants.items():
 # Load market once
 mkt = pd.read_csv(MKT_PATH)  # columns: year, month, ret, rf
 
+# --- NEW: Load MSCI World monthly returns (date, prc, return) ---
+try:
+    world = pd.read_csv(WORLD_PATH, parse_dates=["date"])
+    world["year"] = world["date"].dt.year
+    world["month"] = world["date"].dt.month
+    world = world.rename(columns={"return": "world_ret"})
+except Exception as _e:
+    world = pd.DataFrame(columns=["year","month","world_ret"])
+
 # ------------------------------
 # Summary stats per variant (single-row table)
 # ------------------------------
@@ -894,6 +919,13 @@ def align_with_market(mp):
     out["mkt_ec"] = (equity_curve(out["ret"]) * AUM_START).shift(1, fill_value=AUM_START)
     out["rf_ec"]  = (equity_curve(out["rf"])  * AUM_START).shift(1, fill_value=AUM_START)
     out["ls_ec"]  = (equity_curve(out["port_ls"]) * AUM_START).shift(1, fill_value=AUM_START)
+    # --- NEW: add MSCI World into the alignment ---
+    if not world.empty:
+        out = out.merge(world[["year","month","world_ret"]], on=["year","month"], how="left")
+        out["world_ec"] = (equity_curve(out["world_ret"].fillna(0.0)) * AUM_START).shift(1, fill_value=AUM_START)
+    else:
+        out["world_ret"] = np.nan
+        out["world_ec"] = np.nan
     return out
 
 for name in ["BASE", "LIQ_ONLY", "ILLIQ_ONLY"]:
@@ -907,6 +939,9 @@ for name in ["BASE", "LIQ_ONLY", "ILLIQ_ONLY"]:
     plt.plot(x, aligned["ls_ec"],  label=f"Our L–S ({name})", linewidth=2.2)
     plt.plot(x, aligned["mkt_ec"], label="S&P 500", linewidth=2.0, linestyle="--")
     plt.plot(x, aligned["rf_ec"],  label="Risk-free", linewidth=1.8, linestyle=":")
+    # --- NEW: plot MSCI World ---
+    if "world_ec" in aligned.columns and aligned["world_ec"].notna().any():
+        plt.plot(x, aligned["world_ec"], label="MSCI World", linewidth=1.8, linestyle="-.")
     plt.title(f"S&P500 vs Our L–S — {name}")
     plt.xlabel("Month index (aligned)")
     plt.ylabel(f"Cumulative growth of ${AUM_START:,.0f}")
@@ -1074,7 +1109,7 @@ print(" - summary_stats_by_variant.csv        <-- one row per variant (BASE, LIQ
 print(" - monthly_ls_<VARIANT>.csv            <-- per-variant monthly L/S series (returns + counts + turnover stats + cap-mix + fees)")
 print(" - changes_<VARIANT>.csv               <-- per-variant per-month change log (added/kept/removed by side)")
 print(" - ls_equity_liquid_vs_illiquid_vs_base.csv")
-print(" - sp500_vs_our_LS_<VARIANT>.csv       (BASE, LIQ_ONLY, ILLIQ_ONLY)")
+print(" - sp500_vs_our_LS_<VARIANT>.csv       (BASE, LIQ_ONLY, ILLIQ_ONLY)  + includes MSCI World when available")
 print(" - liquidity_universe_monthly.csv")
 print(" - country_illiquid_removed_counts.csv")
 print(" - picked_liquidity_stats_by_variant.csv")
@@ -1084,7 +1119,7 @@ print(" - rolling_stats_LIQ_ONLY.csv")
 print(" - top_10_long_holdings_LIQ_ONLY.csv, top_10_short_holdings_LIQ_ONLY.csv")
 print("FIGS folder (./figs):")
 print(" - ls_equity_liquid_vs_illiquid_vs_base.png")
-print(" - sp500_vs_our_LS_BASE.png, sp500_vs_our_LS_LIQ_ONLY.png, sp500_vs_our_LS_ILLIQ_ONLY.png")
+print(" - sp500_vs_our_LS_BASE.png, sp500_vs_our_LS_LIQ_ONLY.png, sp500_vs_our_LS_ILLIQ_ONLY.png  (now plotting MSCI World too)")
 print(" - country_illiquid_removed_bar.png")
 print(" - pct_zero_liquidity_over_time.png")
 print(" - performance_metrics_over_time.png")
