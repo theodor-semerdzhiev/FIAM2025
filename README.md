@@ -1,6 +1,7 @@
 # FIAM 2025 — Reverse Algo Submission
 This is the project that was submitted for the FIAM 2025 Hackathaon for our team Reverse Algo.
 This project got us **4th** place at FIAM. 
+[FIAM 2025 Official Site](https://hackathonfinance.com/)
 
 ## Overview
 Reverse Algo developed an ensemble trading architecture tailored for **small-cap equities**, integrating complementary signals that capture distinct dimensions of market behavior.
